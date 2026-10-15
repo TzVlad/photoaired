@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'editor_state.dart';
 import 'dart:math';
@@ -9,14 +9,19 @@ class GeminiService {
 
   GeminiService(this.apiKey);
 
-  Future<EditorState?> analyzePrompt(String prompt, EditorState currentState, {Uint8List? referenceImageBytes}) async {
+  Future<EditorState?> processPrompt({
+    required String prompt,
+    required Uint8List targetImageBytes,
+    Uint8List? referenceImageBytes,
+    required EditorState currentState,
+  }) async {
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
     
     String promptText = '''
-You are a parametric image editor AI.
-The user wants to edit a photo. 
-Here is their intent: "$prompt"
-Current state:
+You are an expert parametric image editor AI analyzing an image and user request.
+The user wants to edit the attached photo. 
+User Intent: "$prompt"
+Current editor state:
 ${jsonEncode(currentState.toJson())}
 
 CRITICAL RULES:
@@ -32,7 +37,7 @@ CRITICAL RULES:
 
     promptText += '''
 COMPOSITION & FOCUS DETECTION RULE:
-If the user prompt does not specify a target object, you MUST visually identify the primary subject in focus (compositional center of interest: e.g. face, object in hands, subject with sharpest edges).
+If the user prompt does not specify a target object, you MUST visually identify the primary subject in focus (compositional center of interest: e.g. face, object in hands, subject with sharpest edges) from the target image.
 Define its bounding box in target_box [ymin, xmin, ymax, xmax] (0 to 1000 scale).
 
 DO NOT create generic harsh vignettes. All masks must be subtle Dodge & Burn adjustments:
@@ -69,7 +74,13 @@ Return only the raw JSON. No markdown code blocks.
 ''';
 
     final parts = <Map<String, dynamic>>[
-      {"text": promptText}
+      {"text": promptText},
+      {
+        "inlineData": {
+          "mimeType": "image/jpeg",
+          "data": base64Encode(targetImageBytes)
+        }
+      }
     ];
 
     if (referenceImageBytes != null) {
@@ -161,7 +172,7 @@ Return only the raw JSON. No markdown code blocks.
         return newState;
       }
     } catch (e) {
-      print('Gemini API Error: $e');
+      debugPrint('Gemini API Error: $e');
     }
     return null;
   }

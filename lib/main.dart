@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'dart:ui' as ui;
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:image_picker/image_picker.dart';
 import 'package:gal/gal.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:http/http.dart' as http;
 import 'editor_state.dart';
 import 'gemini_service.dart';
 
@@ -78,14 +81,13 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   bool _isTourPlaying = false;
   late TabController _tabController;
   
+  File? _currentImageFile;
+  Uint8List? _imageBytes;
+
   final List<EditorState> _undoStack = [];
   final List<EditorState> _redoStack = [];
   XFile? _referenceImage;
   final GlobalKey _previewGlobalKey = GlobalKey();
-
-  late AnimationController _aiAnimationController;
-  late EditorState _animStartState;
-  late EditorState _animTargetState;
   
   late final GeminiService _geminiService = GeminiService('AQ.Ab8RN6Jiqr68UTqaX58ECo-nk4aoInOXYDh04nLVirlWo164RA');
 
@@ -106,6 +108,67 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
     _promptController.dispose();
     _promptFocusNode.dispose();
     super.dispose();
+  }
+
+  void _resetState() {
+    _state = const EditorState();
+    _undoStack.clear();
+    _redoStack.clear();
+    _referenceImage = null;
+  }
+
+  void _closeImage() {
+    setState(() {
+      _currentImageFile = null;
+      _imageBytes = null;
+      _resetState();
+    });
+  }
+
+  Future<void> _selectImage(ImageSource source) async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: source, maxWidth: 2048, maxHeight: 2048);
+    if (picked != null) {
+      final file = File(picked.path);
+      final bytes = await file.readAsBytes();
+      setState(() {
+        _currentImageFile = file;
+        _imageBytes = bytes;
+        _resetState();
+      });
+    }
+  }
+
+  Future<void> _loadDemoImage() async {
+    setState(() {
+      _isLoading = true;
+    });
+    try {
+      const demoUrl = 'https://images.unsplash.com/photo-1542038784456-1ea8e935640e?q=80&w=1000';
+      final response = await http.get(Uri.parse(demoUrl));
+      if (response.statusCode == 200) {
+        final tempDir = await getTemporaryDirectory();
+        final file = File('${tempDir.path}/temp_demo.jpg');
+        await file.writeAsBytes(response.bodyBytes);
+        setState(() {
+          _currentImageFile = file;
+          _imageBytes = response.bodyBytes;
+          _resetState();
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Помилка завантаження демо: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
   }
 
   void _pushUndoState() {
@@ -209,7 +272,6 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   void _updateState(EditorState newState) {
     setState(() {
       _state = newState;
-      _imageState = newState;
     });
   }
 
@@ -327,6 +389,11 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
     final prompt = _promptController.text.trim();
     if (prompt.isEmpty) return;
     
+    if (_imageBytes == null && _currentImageFile != null) {
+      _imageBytes = await _currentImageFile!.readAsBytes();
+    }
+    if (_imageBytes == null) return;
+
     _promptFocusNode.unfocus();
 
     setState(() {
@@ -334,7 +401,12 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
     });
 
     final referenceBytes = _referenceImage != null ? await _referenceImage!.readAsBytes() : null;
-    final newState = await _geminiService.analyzePrompt(prompt, _originalState, referenceImageBytes: referenceBytes);
+    final newState = await _geminiService.processPrompt(
+      prompt: prompt,
+      targetImageBytes: _imageBytes!,
+      referenceImageBytes: referenceBytes,
+      currentState: _originalState,
+    );
     
     if (newState != null) {
       _pushUndoState();
@@ -419,6 +491,10 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
 
   @override
   Widget build(BuildContext context) {
+    if (_currentImageFile == null) {
+      return _buildImportScreen();
+    }
+
     final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
 
     return Scaffold(
@@ -429,6 +505,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
         child: Column(
           children: [
             EditorTopBar(
+              onClose: _closeImage,
               onShowOriginalDown: () => setState(() => _showOriginal = true),
               onShowOriginalUp: () => setState(() => _showOriginal = false),
               canUndo: _undoStack.isNotEmpty,
@@ -450,9 +527,12 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
                         children: [
                         ColorFiltered(
                           colorFilter: ColorFilter.matrix(_buildColorMatrix(_showOriginal ? _originalState : _state)),
-                          child: Image.network(
-                            'https://images.unsplash.com/photo-1542038784456-1ea8e935640e?q=80&w=1000',
+                          child: Image.file(
+                            _currentImageFile!,
                             fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) => const Center(
+                              child: Text('Помилка завантаження фото', style: TextStyle(color: Colors.white)),
+                            ),
                           ),
                         ),
                         if (!_showOriginal)
@@ -526,6 +606,100 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildImportScreen() {
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: AppColors.panel,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: AppColors.border, width: 1),
+                  ),
+                  child: const Icon(Icons.photo_library_outlined, size: 36, color: Colors.white),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'AI Photo Editor',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: -0.5,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Choose a photo from your device or camera to start editing',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: AppColors.secondaryText,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 40),
+                if (_isLoading)
+                  const CircularProgressIndicator(color: Colors.white)
+                else ...[
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      minimumSize: const Size(double.infinity, 52),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                      elevation: 0,
+                    ),
+                    onPressed: () => _selectImage(ImageSource.gallery),
+                    icon: const Icon(Icons.photo_library, size: 20),
+                    label: const Text(
+                      'Select from Gallery',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: AppColors.border),
+                      minimumSize: const Size(double.infinity, 52),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                    ),
+                    onPressed: () => _selectImage(ImageSource.camera),
+                    icon: const Icon(Icons.camera_alt, size: 20),
+                    label: const Text(
+                      'Take a Photo',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.secondaryText,
+                    ),
+                    onPressed: _loadDemoImage,
+                    icon: const Icon(Icons.play_circle_outline, size: 18),
+                    label: const Text(
+                      'Спробувати демо-кадр',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -650,6 +824,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
 }
 
 class EditorTopBar extends StatelessWidget {
+  final VoidCallback onClose;
   final VoidCallback onShowOriginalDown;
   final VoidCallback onShowOriginalUp;
   final bool canUndo;
@@ -660,6 +835,7 @@ class EditorTopBar extends StatelessWidget {
 
   const EditorTopBar({
     super.key, 
+    required this.onClose,
     required this.onShowOriginalDown, 
     required this.onShowOriginalUp,
     required this.canUndo,
@@ -682,7 +858,7 @@ class EditorTopBar extends StatelessWidget {
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
             icon: const Icon(Icons.close, color: Colors.white, size: 22),
-            onPressed: () {},
+            onPressed: onClose,
           ),
           Row(
             mainAxisSize: MainAxisSize.min,
