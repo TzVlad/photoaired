@@ -38,6 +38,8 @@ String sanitizeJson(String raw) {
 
 class GeminiService {
   final String apiKey;
+  
+  static const bool kDebugMockMode = false;
 
   GeminiService(this.apiKey);
 
@@ -47,6 +49,19 @@ class GeminiService {
     Uint8List? referenceImageBytes,
     required EditorState currentState,
   }) async {
+    if (kDebugMockMode) {
+      debugPrint('[AI Pipeline] Running in MOCK mode');
+      await Future.delayed(const Duration(milliseconds: 700));
+      return currentState.copyWith(
+        exposure: (currentState.exposure + 0.25).clamp(-2.0, 2.0),
+        contrast: (currentState.contrast + 0.15).clamp(0.5, 2.0),
+        temperature: -0.20,
+        tint: 0.10,
+        shadows: 0.15,
+        highlights: -0.30,
+      );
+    }
+
     final preparedTargetBytes = await prepareImageForGemini(targetImageBytes);
     final preparedReferenceBytes = referenceImageBytes != null
         ? await prepareImageForGemini(referenceImageBytes)
@@ -74,8 +89,8 @@ CRITICAL RULES:
 
     promptText += '''
 COMPOSITION & FOCUS DETECTION RULE:
-If the user prompt does not specify a target object, you MUST visually identify the primary subject in focus (compositional center of interest: e.g. face, object in hands, subject with sharpest edges) from the target image.
-Define its bounding box in target_box [ymin, xmin, ymax, xmax] (0 to 1000 scale).
+MASK RULE (STRICT): If the user request is global (e.g., 'vintage', 'black and white', 'increase exposure', 'cinematic warm', 'more contrast'), target_box and mask_intent MUST BE null.
+ONLY populate target_box [ymin, xmin, ymax, xmax] if the user explicitly asks for a local change ('brighten face', 'darken background') OR the prompt strictly requires isolating a distinct primary subject.
 
 DO NOT create generic harsh vignettes. All masks must be subtle Dodge & Burn adjustments:
 - feather MUST be between 0.70 and 0.85 (ultra-soft gradient falloff).
@@ -104,8 +119,8 @@ Output ONLY a valid JSON object matching this schema exactly.
     "sharpness": 0.0,
     "grain": 0.0
   },
-  "target_box": [200, 200, 800, 800],
-  "mask_intent": "highlight"
+  "target_box": null,
+  "mask_intent": null
 }
 Return only the raw JSON. No markdown code blocks.
 ''';
@@ -140,109 +155,97 @@ Return only the raw JSON. No markdown code blocks.
       }
     });
 
-    final modelsToTry = [
-      'gemini-1.5-flash',
-      'gemini-1.5-flash-latest',
-      'gemini-2.0-flash',
-      'gemini-1.5-pro',
-    ];
+    final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent');
+    final headers = {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    };
 
-    String? lastErrorMsg;
+    try {
+      debugPrint('[AI Pipeline] Requesting endpoint: $url');
+      final response = await http.post(
+        url,
+        headers: headers,
+        body: body,
+      );
 
-    for (final modelName in modelsToTry) {
-      final url = 'https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent';
-      try {
-        debugPrint('[AI Pipeline] Attempting Gemini request with model: $modelName');
-        final response = await http.post(
-          Uri.parse('$url?key=$apiKey'),
-          headers: {'Content-Type': 'application/json'},
-          body: body,
+      debugPrint('[AI Pipeline] Status code: ${response.statusCode}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final contentText = data['candidates'][0]['content']['parts'][0]['text'];
+        debugPrint('[AI Pipeline] Raw Gemini response text: $contentText');
+
+        final cleanedJsonStr = sanitizeJson(contentText);
+        debugPrint('[AI Pipeline] Cleaned JSON string: $cleanedJsonStr');
+
+        final jsonContent = jsonDecode(cleanedJsonStr);
+        
+        double clampVal(dynamic val, double min, double max, double def) {
+          if (val == null || val is! num) return def;
+          return val.toDouble().clamp(min, max);
+        }
+
+        EditorState newState = currentState.copyWith(
+          exposure: clampVal(jsonContent['adjustments']['exposure'], -2.0, 2.0, currentState.exposure),
+          contrast: clampVal(jsonContent['adjustments']['contrast'], 0.5, 2.0, currentState.contrast),
+          highlights: clampVal(jsonContent['adjustments']['highlights'], -1.0, 1.0, currentState.highlights),
+          shadows: clampVal(jsonContent['adjustments']['shadows'], -1.0, 1.0, currentState.shadows),
+          whites: clampVal(jsonContent['adjustments']['whites'], -1.0, 1.0, currentState.whites),
+          blacks: clampVal(jsonContent['adjustments']['blacks'], -1.0, 1.0, currentState.blacks),
+          temperature: clampVal(jsonContent['adjustments']['temperature'], -1.0, 1.0, currentState.temperature),
+          tint: clampVal(jsonContent['adjustments']['tint'], -1.0, 1.0, currentState.tint),
+          saturation: clampVal(jsonContent['adjustments']['saturation'], 0.0, 2.0, currentState.saturation),
+          vibrance: clampVal(jsonContent['adjustments']['vibrance'], -1.0, 1.0, currentState.vibrance),
+          colorGradingShadowHue: clampVal(jsonContent['adjustments']['color_grading_shadow_hue'], 0.0, 360.0, currentState.colorGradingShadowHue),
+          colorGradingHighlightHue: clampVal(jsonContent['adjustments']['color_grading_highlight_hue'], 0.0, 360.0, currentState.colorGradingHighlightHue),
+          clarity: clampVal(jsonContent['adjustments']['clarity'], -1.0, 1.0, currentState.clarity),
+          sharpness: clampVal(jsonContent['adjustments']['sharpness'], 0.0, 1.0, currentState.sharpness),
+          grain: clampVal(jsonContent['adjustments']['grain'], 0.0, 1.0, currentState.grain),
         );
 
-        debugPrint('[AI Pipeline] [$modelName] Response status: ${response.statusCode}');
-
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          final contentText = data['candidates'][0]['content']['parts'][0]['text'];
-          debugPrint('[AI Pipeline] Raw Gemini response text: $contentText');
-
-          final cleanedJsonStr = sanitizeJson(contentText);
-          debugPrint('[AI Pipeline] Cleaned JSON string: $cleanedJsonStr');
-
-          final jsonContent = jsonDecode(cleanedJsonStr);
-          
-          double clampVal(dynamic val, double min, double max, double def) {
-            if (val == null || val is! num) return def;
-            return val.toDouble().clamp(min, max);
+        if (jsonContent['target_box'] != null && jsonContent['target_box'] is List) {
+          final box = jsonContent['target_box'] as List;
+          if (box.length == 4) {
+            final double ymin = (box[0] as num).toDouble();
+            final double xmin = (box[1] as num).toDouble();
+            final double ymax = (box[2] as num).toDouble();
+            final double xmax = (box[3] as num).toDouble();
+            
+            final double cx = ((xmin + xmax) / 2.0) / 1000.0;
+            final double cy = ((ymin + ymax) / 2.0) / 1000.0;
+            final double width = (xmax - xmin).abs() / 1000.0;
+            final double height = (ymax - ymin).abs() / 1000.0;
+            final double radius = (max(width, height) * 0.6).clamp(0.2, 0.5);
+            
+            String intent = jsonContent['mask_intent'] ?? 'highlight';
+            
+            AdjustmentMask newMask = AdjustmentMask(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              name: 'AI Mask',
+              centerX: cx,
+              centerY: cy,
+              radius: radius,
+              feather: 0.75,
+              exposure: intent == 'dim_background' ? -0.2 : 0.2,
+              isInverted: intent == 'dim_background',
+            );
+            
+            newState = newState.addMask(newMask);
           }
-
-          EditorState newState = currentState.copyWith(
-            exposure: clampVal(jsonContent['adjustments']['exposure'], -2.0, 2.0, currentState.exposure),
-            contrast: clampVal(jsonContent['adjustments']['contrast'], 0.5, 2.0, currentState.contrast),
-            highlights: clampVal(jsonContent['adjustments']['highlights'], -1.0, 1.0, currentState.highlights),
-            shadows: clampVal(jsonContent['adjustments']['shadows'], -1.0, 1.0, currentState.shadows),
-            whites: clampVal(jsonContent['adjustments']['whites'], -1.0, 1.0, currentState.whites),
-            blacks: clampVal(jsonContent['adjustments']['blacks'], -1.0, 1.0, currentState.blacks),
-            temperature: clampVal(jsonContent['adjustments']['temperature'], -1.0, 1.0, currentState.temperature),
-            tint: clampVal(jsonContent['adjustments']['tint'], -1.0, 1.0, currentState.tint),
-            saturation: clampVal(jsonContent['adjustments']['saturation'], 0.0, 2.0, currentState.saturation),
-            vibrance: clampVal(jsonContent['adjustments']['vibrance'], -1.0, 1.0, currentState.vibrance),
-            colorGradingShadowHue: clampVal(jsonContent['adjustments']['color_grading_shadow_hue'], 0.0, 360.0, currentState.colorGradingShadowHue),
-            colorGradingHighlightHue: clampVal(jsonContent['adjustments']['color_grading_highlight_hue'], 0.0, 360.0, currentState.colorGradingHighlightHue),
-            clarity: clampVal(jsonContent['adjustments']['clarity'], -1.0, 1.0, currentState.clarity),
-            sharpness: clampVal(jsonContent['adjustments']['sharpness'], 0.0, 1.0, currentState.sharpness),
-            grain: clampVal(jsonContent['adjustments']['grain'], 0.0, 1.0, currentState.grain),
-          );
-
-          if (jsonContent['target_box'] != null && jsonContent['target_box'] is List) {
-            final box = jsonContent['target_box'] as List;
-            if (box.length == 4) {
-              final double ymin = (box[0] as num).toDouble();
-              final double xmin = (box[1] as num).toDouble();
-              final double ymax = (box[2] as num).toDouble();
-              final double xmax = (box[3] as num).toDouble();
-              
-              final double cx = ((xmin + xmax) / 2.0) / 1000.0;
-              final double cy = ((ymin + ymax) / 2.0) / 1000.0;
-              final double width = (xmax - xmin).abs() / 1000.0;
-              final double height = (ymax - ymin).abs() / 1000.0;
-              final double radius = (max(width, height) * 0.6).clamp(0.2, 0.5);
-              
-              String intent = jsonContent['mask_intent'] ?? 'highlight';
-              
-              AdjustmentMask newMask = AdjustmentMask(
-                id: DateTime.now().millisecondsSinceEpoch.toString(),
-                name: 'AI Mask',
-                centerX: cx,
-                centerY: cy,
-                radius: radius,
-                feather: 0.75,
-                exposure: intent == 'dim_background' ? -0.2 : 0.2,
-                isInverted: intent == 'dim_background',
-              );
-              
-              newState = newState.addMask(newMask);
-            }
-          }
-
-          debugPrint('[AI Pipeline] Parsed EditorState using $modelName: ${jsonEncode(newState.toJson())}');
-          return newState;
-        } else if (response.statusCode == 404) {
-          lastErrorMsg = '404 NOT_FOUND for model $modelName: ${response.body}';
-          debugPrint('[AI Pipeline] $lastErrorMsg. Retrying with fallback model...');
-          continue;
         } else {
-          throw Exception('Gemini API returned status ${response.statusCode}: ${response.body}');
+          newState = newState.copyWith(masks: currentState.masks);
         }
-      } catch (e) {
-        if (e is Exception && e.toString().contains('404')) {
-          lastErrorMsg = e.toString();
-          continue;
-        }
-        rethrow;
-      }
-    }
 
-    throw Exception('Gemini API Error: All model endpoints returned NOT_FOUND. Please ensure your API Key is a valid Google AI Studio key (usually starting with AIzaSy) with Gemini API enabled.\nDetails: $lastErrorMsg');
+        debugPrint('[AI Pipeline] Success with endpoint $url');
+        return newState;
+      } else {
+        debugPrint('[AI Pipeline Error ${response.statusCode}]: ${response.body}');
+        throw Exception('Gemini API Error (${response.statusCode}): ${response.body}');
+      }
+    } catch (e, stackTrace) {
+      debugPrint('[ERROR] Gemini API Exception: $e\n$stackTrace');
+      rethrow;
+    }
   }
 }

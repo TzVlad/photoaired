@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'dart:ui' as ui;
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:image_picker/image_picker.dart';
 import 'package:gal/gal.dart';
@@ -237,35 +238,66 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   }
 
   List<double> _buildColorMatrix(EditorState state) {
-    double e = state.exposure * 255;
-    double c = state.contrast;
-    double t = (1.0 - c) * 128;
-    double s = state.saturation;
-    double temp = state.temperature * 50; 
-    double tint = state.tint * 50;
+    // 1. Експозиція та контраст
+    final double c = state.contrast;
+    final double t = (1.0 - c) * 128.0;
+    final double e = state.exposure * 128.0;
 
-    double rW = 0.2126;
-    double gW = 0.7152;
-    double bW = 0.0722;
-    double invS = 1.0 - s;
-    
-    double rR = invS * rW + s;
-    double rG = invS * gW;
-    double rB = invS * bW;
-    
-    double gR = invS * rW;
-    double gG = invS * gW + s;
-    double gB = invS * bW;
-    
-    double bR = invS * rW;
-    double bG = invS * gW;
-    double bB = invS * bW + s;
+    // 2. Тональний діапазон (Whites, Blacks, Highlights, Shadows)
+    // Імітація через комбінований зсув рівнів чорного, білого та півтонів
+    final double wShift = state.whites * 40.0;
+    final double bShift = state.blacks * 40.0;
+    final double hShift = state.highlights * 35.0;
+    final double shShift = state.shadows * 35.0;
+    final double lumaOffset = e + t + wShift + bShift + hShift + shShift;
 
+    // 3. Насиченість та Vibrance
+    // Vibrance підсилює загальну насиченість із захистом від перепалу
+    final double effectiveSat = (state.saturation * (1.0 + state.vibrance * 0.4)).clamp(0.0, 3.0);
+    final double invS = 1.0 - effectiveSat;
+    const double rW = 0.2126;
+    const double gW = 0.7152;
+    const double bW = 0.0722;
+
+    final double rR = invS * rW + effectiveSat;
+    final double rG = invS * gW;
+    final double rB = invS * bW;
+
+    final double gR = invS * rW;
+    final double gG = invS * gW + effectiveSat;
+    final double gB = invS * bW;
+
+    final double bR = invS * rW;
+    final double bG = invS * gW;
+    final double bB = invS * bW + effectiveSat;
+
+    // 4. White Balance (Температура та Тінт)
+    final double temp = state.temperature * 45.0;
+    final double tint = state.tint * 45.0;
+
+    // 5. Color Grading (Split Toning через Hue тіней та світла)
+    double shadowR = 0, shadowG = 0, shadowB = 0;
+    if (state.colorGradingShadowHue > 0) {
+      final double radS = state.colorGradingShadowHue * 3.1415926535 / 180.0;
+      shadowR = 15.0 * math.cos(radS);
+      shadowG = 15.0 * math.sin(radS);
+      shadowB = -15.0 * math.cos(radS);
+    }
+
+    double highlightR = 0, highlightG = 0, highlightB = 0;
+    if (state.colorGradingHighlightHue > 0) {
+      final double radH = state.colorGradingHighlightHue * 3.1415926535 / 180.0;
+      highlightR = 12.0 * math.cos(radH);
+      highlightG = 12.0 * math.sin(radH);
+      highlightB = -12.0 * math.cos(radH);
+    }
+
+    // Підсумкове зведення в ColorFilter.matrix (4x5)
     return [
-      rR * c, rG * c, rB * c, 0, e + t + temp + tint,
-      gR * c, gG * c, gB * c, 0, e + t - tint,
-      bR * c, bG * c, bB * c, 0, e + t - temp,
-      0, 0, 0, 1, 0,
+      rR * c, rG * c, rB * c, 0, lumaOffset + temp + tint + shadowR + highlightR,
+      gR * c, gG * c, gB * c, 0, lumaOffset - tint + shadowG + highlightG,
+      bR * c, bG * c, bB * c, 0, lumaOffset - temp + shadowB + highlightB,
+      0,      0,      0,      1, 0,
     ];
   }
 
@@ -429,15 +461,14 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
         prompt: prompt,
         targetImageBytes: _imageBytes!,
         referenceImageBytes: referenceBytes,
-        currentState: _originalState,
+        currentState: _state,
       );
       
       if (newState != null) {
         _pushUndoState();
-        final combinedMasks = List<AdjustmentMask>.from(_state.masks)..addAll(newState.masks);
         
         final animStartState = _state;
-        final animTargetState = newState.copyWith(masks: combinedMasks);
+        final animTargetState = newState;
         
         await _runSynchronizedTour(animStartState, animTargetState);
       }
