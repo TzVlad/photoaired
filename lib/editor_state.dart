@@ -191,8 +191,11 @@ class EditorState {
   }
   
   EditorState addMask(AdjustmentMask mask) {
-    if (masks.length >= 4) return this;
-    final newMasks = List<AdjustmentMask>.from(masks)..add(mask);
+    final newMasks = List<AdjustmentMask>.from(masks);
+    if (newMasks.length >= 4) {
+      newMasks.removeAt(0);
+    }
+    newMasks.add(mask);
     return copyWith(masks: newMasks, selectedMaskIndex: newMasks.length - 1);
   }
 

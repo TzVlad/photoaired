@@ -80,6 +80,8 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   bool _isLoading = false;
   bool _showOriginal = false;
   bool _isTourPlaying = false;
+  
+  bool get _isBusy => _isLoading || _isTourPlaying;
   late TabController _tabController;
   
   File? _currentImageFile;
@@ -441,6 +443,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   }
 
   Future<void> _applyAI() async {
+    if (_isBusy) return;
     final prompt = _promptController.text.trim();
     if (prompt.isEmpty) return;
     
@@ -574,6 +577,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
               onShowOriginalUp: () => setState(() => _showOriginal = false),
               canUndo: _undoStack.isNotEmpty,
               canRedo: _redoStack.isNotEmpty,
+              isBusy: _isBusy,
               onUndo: _undo,
               onRedo: _redo,
               onExport: _exportImage,
@@ -802,7 +806,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
               child: IconButton(
                 padding: EdgeInsets.zero,
                 icon: const Icon(Icons.attach_file, color: Colors.grey, size: 18),
-                onPressed: _pickReferenceImage,
+                onPressed: _isBusy ? null : _pickReferenceImage,
               ),
             ),
             if (_referenceImage != null)
@@ -847,6 +851,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
               child: TextField(
                 controller: _promptController,
                 focusNode: _promptFocusNode,
+                enabled: !_isBusy,
                 style: const TextStyle(color: Colors.white, fontSize: 14),
                 decoration: const InputDecoration(
                   hintText: 'cinematic moody warm low-key...',
@@ -867,11 +872,11 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
               )
             else
               GestureDetector(
-                onTap: _applyAI,
+                onTap: _isBusy ? null : _applyAI,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: _isBusy ? Colors.white38 : Colors.white,
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: const Text(
@@ -893,6 +898,7 @@ class EditorTopBar extends StatelessWidget {
   final VoidCallback onShowOriginalUp;
   final bool canUndo;
   final bool canRedo;
+  final bool isBusy;
   final VoidCallback onUndo;
   final VoidCallback onRedo;
   final VoidCallback onExport;
@@ -904,6 +910,7 @@ class EditorTopBar extends StatelessWidget {
     required this.onShowOriginalUp,
     required this.canUndo,
     required this.canRedo,
+    required this.isBusy,
     required this.onUndo,
     required this.onRedo,
     required this.onExport,
@@ -921,8 +928,8 @@ class EditorTopBar extends StatelessWidget {
           IconButton(
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
-            icon: const Icon(Icons.close, color: Colors.white, size: 22),
-            onPressed: onClose,
+            icon: Icon(Icons.close, color: isBusy ? Colors.white38 : Colors.white, size: 22),
+            onPressed: isBusy ? null : onClose,
           ),
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -930,32 +937,32 @@ class EditorTopBar extends StatelessWidget {
               IconButton(
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 40),
-                icon: Icon(Icons.undo, size: 20, color: canUndo ? Colors.white : const Color(0xFF3A3A3C)),
-                onPressed: canUndo ? onUndo : null,
+                icon: Icon(Icons.undo, size: 20, color: (canUndo && !isBusy) ? Colors.white : const Color(0xFF3A3A3C)),
+                onPressed: (canUndo && !isBusy) ? onUndo : null,
               ),
               IconButton(
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 40),
-                icon: Icon(Icons.redo, size: 20, color: canRedo ? Colors.white : const Color(0xFF3A3A3C)),
-                onPressed: canRedo ? onRedo : null,
+                icon: Icon(Icons.redo, size: 20, color: (canRedo && !isBusy) ? Colors.white : const Color(0xFF3A3A3C)),
+                onPressed: (canRedo && !isBusy) ? onRedo : null,
               ),
               GestureDetector(
-                onTapDown: (_) => onShowOriginalDown(),
-                onTapUp: (_) => onShowOriginalUp(),
-                onTapCancel: () => onShowOriginalUp(),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 8.0),
-                  child: Icon(Icons.visibility_outlined, color: Color(0xFF8E8E93), size: 22),
+                onTapDown: isBusy ? null : (_) => onShowOriginalDown(),
+                onTapUp: isBusy ? null : (_) => onShowOriginalUp(),
+                onTapCancel: isBusy ? null : () => onShowOriginalUp(),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                  child: Icon(Icons.visibility_outlined, color: isBusy ? const Color(0xFF3A3A3C) : const Color(0xFF8E8E93), size: 22),
                 ),
               ),
             ],
           ),
           GestureDetector(
-            onTap: onExport,
+            onTap: isBusy ? null : onExport,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: isBusy ? Colors.white38 : Colors.white,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: const Text(
@@ -977,19 +984,28 @@ Widget _buildEditorSlider(String label, double value, double min, double max, do
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
-            Text(
-              safeValue.toStringAsFixed(2), 
-              style: const TextStyle(
-                color: Colors.white70, 
-                fontSize: 12,
-                fontFeatures: [FontFeature.tabularFigures()]
-              )
-            ),
-          ],
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onDoubleTap: () {
+            if (safeValue != defaultValue) {
+              onChangeStart?.call(defaultValue);
+              onChanged(defaultValue);
+            }
+          },
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
+              Text(
+                safeValue.toStringAsFixed(2), 
+                style: const TextStyle(
+                  color: Colors.white70, 
+                  fontSize: 12,
+                  fontFeatures: [FontFeature.tabularFigures()]
+                )
+              ),
+            ],
+          ),
         ),
         Slider(
           value: safeValue,
