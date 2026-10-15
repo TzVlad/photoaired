@@ -89,7 +89,7 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   XFile? _referenceImage;
   final GlobalKey _previewGlobalKey = GlobalKey();
   
-  late final GeminiService _geminiService = GeminiService('AQ.Ab8RN6Jiqr68UTqaX58ECo-nk4aoInOXYDh04nLVirlWo164RA');
+  late final GeminiService _geminiService = GeminiService('AQ.Ab8RN6Kztm9E0SzF9S6AXTSL8WotBaTPj6faoA7qKIJv8LnRQw');
 
   @override
   void initState() {
