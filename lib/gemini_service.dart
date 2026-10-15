@@ -156,8 +156,8 @@ Return only the raw JSON. No markdown code blocks.
     });
 
     final endpointsToTry = [
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent',
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent',
     ];
 
     String? lastErrorDetails;
