@@ -104,6 +104,34 @@ class EditorState {
     );
   }
 
+  static EditorState lerp(EditorState a, EditorState b, double t) {
+    double l(double x, double y) => x + (y - x) * t;
+    return EditorState(
+      exposure: l(a.exposure, b.exposure),
+      contrast: l(a.contrast, b.contrast),
+      highlights: l(a.highlights, b.highlights),
+      shadows: l(a.shadows, b.shadows),
+      whites: l(a.whites, b.whites),
+      blacks: l(a.blacks, b.blacks),
+      temperature: l(a.temperature, b.temperature),
+      tint: l(a.tint, b.tint),
+      saturation: l(a.saturation, b.saturation),
+      vibrance: l(a.vibrance, b.vibrance),
+      colorGradingShadowHue: l(a.colorGradingShadowHue, b.colorGradingShadowHue),
+      colorGradingHighlightHue: l(a.colorGradingHighlightHue, b.colorGradingHighlightHue),
+      clarity: l(a.clarity, b.clarity),
+      sharpness: l(a.sharpness, b.sharpness),
+      grain: l(a.grain, b.grain),
+      vignetteAmount: l(a.vignetteAmount, b.vignetteAmount),
+      vignetteRadius: l(a.vignetteRadius, b.vignetteRadius),
+      vignetteFeather: l(a.vignetteFeather, b.vignetteFeather),
+      maskCenterX: l(a.maskCenterX, b.maskCenterX),
+      maskCenterY: l(a.maskCenterY, b.maskCenterY),
+      maskAspectRatio: l(a.maskAspectRatio, b.maskAspectRatio),
+      showMaskOverlay: t > 0.5 ? b.showMaskOverlay : a.showMaskOverlay,
+    );
+  }
+
   factory EditorState.fromJson(Map<String, dynamic> json) {
     double clamp(dynamic val, double min, double max, double def) {
       if (val == null) return def;
