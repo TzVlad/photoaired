@@ -1,8 +1,27 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import 'editor_state.dart';
 import 'dart:math';
+
+Uint8List _resizeAndCompressImage(Uint8List rawBytes) {
+  final image = img.decodeImage(rawBytes);
+  if (image == null) return rawBytes;
+
+  img.Image resized;
+  if (image.width >= image.height) {
+    resized = img.copyResize(image, width: 512);
+  } else {
+    resized = img.copyResize(image, height: 512);
+  }
+
+  return Uint8List.fromList(img.encodeJpg(resized, quality: 75));
+}
+
+Future<Uint8List> prepareImageForGemini(Uint8List rawBytes) async {
+  return compute(_resizeAndCompressImage, rawBytes);
+}
 
 class GeminiService {
   final String apiKey;
@@ -17,6 +36,11 @@ class GeminiService {
   }) async {
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
     
+    final preparedTargetBytes = await prepareImageForGemini(targetImageBytes);
+    final preparedReferenceBytes = referenceImageBytes != null
+        ? await prepareImageForGemini(referenceImageBytes)
+        : null;
+
     String promptText = '''
 You are an expert parametric image editor AI analyzing an image and user request.
 The user wants to edit the attached photo. 
@@ -29,7 +53,7 @@ CRITICAL RULES:
 - Generate absolute target settings based on a neutral/default baseline, rather than multiplying or blowing out current values.
 ''';
 
-    if (referenceImageBytes != null) {
+    if (preparedReferenceBytes != null) {
       promptText += '''
 - Analyze the color grade and lighting of the reference image, apply similar grading to the target image. Avoid blown-out highlights.
 ''';
@@ -78,16 +102,16 @@ Return only the raw JSON. No markdown code blocks.
       {
         "inlineData": {
           "mimeType": "image/jpeg",
-          "data": base64Encode(targetImageBytes)
+          "data": base64Encode(preparedTargetBytes)
         }
       }
     ];
 
-    if (referenceImageBytes != null) {
+    if (preparedReferenceBytes != null) {
       parts.add({
         "inlineData": {
           "mimeType": "image/jpeg",
-          "data": base64Encode(referenceImageBytes)
+          "data": base64Encode(preparedReferenceBytes)
         }
       });
     }
