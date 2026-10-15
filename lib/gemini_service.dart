@@ -47,8 +47,6 @@ class GeminiService {
     Uint8List? referenceImageBytes,
     required EditorState currentState,
   }) async {
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-    
     final preparedTargetBytes = await prepareImageForGemini(targetImageBytes);
     final preparedReferenceBytes = referenceImageBytes != null
         ? await prepareImageForGemini(referenceImageBytes)
@@ -142,87 +140,109 @@ Return only the raw JSON. No markdown code blocks.
       }
     });
 
-    try {
-      final response = await http.post(
-        Uri.parse('$url?key=$apiKey'),
-        headers: {'Content-Type': 'application/json'},
-        body: body,
-      );
+    final modelsToTry = [
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-latest',
+      'gemini-2.0-flash',
+      'gemini-1.5-pro',
+    ];
 
-      debugPrint('[AI Pipeline] Response status: ${response.statusCode}');
+    String? lastErrorMsg;
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final contentText = data['candidates'][0]['content']['parts'][0]['text'];
-        debugPrint('[AI Pipeline] Raw Gemini response text: $contentText');
-
-        final cleanedJsonStr = sanitizeJson(contentText);
-        debugPrint('[AI Pipeline] Cleaned JSON string: $cleanedJsonStr');
-
-        final jsonContent = jsonDecode(cleanedJsonStr);
-        
-        double clampVal(dynamic val, double min, double max, double def) {
-          if (val == null || val is! num) return def;
-          return val.toDouble().clamp(min, max);
-        }
-
-        EditorState newState = currentState.copyWith(
-          exposure: clampVal(jsonContent['adjustments']['exposure'], -2.0, 2.0, currentState.exposure),
-          contrast: clampVal(jsonContent['adjustments']['contrast'], 0.5, 2.0, currentState.contrast),
-          highlights: clampVal(jsonContent['adjustments']['highlights'], -1.0, 1.0, currentState.highlights),
-          shadows: clampVal(jsonContent['adjustments']['shadows'], -1.0, 1.0, currentState.shadows),
-          whites: clampVal(jsonContent['adjustments']['whites'], -1.0, 1.0, currentState.whites),
-          blacks: clampVal(jsonContent['adjustments']['blacks'], -1.0, 1.0, currentState.blacks),
-          temperature: clampVal(jsonContent['adjustments']['temperature'], -1.0, 1.0, currentState.temperature),
-          tint: clampVal(jsonContent['adjustments']['tint'], -1.0, 1.0, currentState.tint),
-          saturation: clampVal(jsonContent['adjustments']['saturation'], 0.0, 2.0, currentState.saturation),
-          vibrance: clampVal(jsonContent['adjustments']['vibrance'], -1.0, 1.0, currentState.vibrance),
-          colorGradingShadowHue: clampVal(jsonContent['adjustments']['color_grading_shadow_hue'], 0.0, 360.0, currentState.colorGradingShadowHue),
-          colorGradingHighlightHue: clampVal(jsonContent['adjustments']['color_grading_highlight_hue'], 0.0, 360.0, currentState.colorGradingHighlightHue),
-          clarity: clampVal(jsonContent['adjustments']['clarity'], -1.0, 1.0, currentState.clarity),
-          sharpness: clampVal(jsonContent['adjustments']['sharpness'], 0.0, 1.0, currentState.sharpness),
-          grain: clampVal(jsonContent['adjustments']['grain'], 0.0, 1.0, currentState.grain),
+    for (final modelName in modelsToTry) {
+      final url = 'https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent';
+      try {
+        debugPrint('[AI Pipeline] Attempting Gemini request with model: $modelName');
+        final response = await http.post(
+          Uri.parse('$url?key=$apiKey'),
+          headers: {'Content-Type': 'application/json'},
+          body: body,
         );
 
-        if (jsonContent['target_box'] != null && jsonContent['target_box'] is List) {
-          final box = jsonContent['target_box'] as List;
-          if (box.length == 4) {
-            final double ymin = (box[0] as num).toDouble();
-            final double xmin = (box[1] as num).toDouble();
-            final double ymax = (box[2] as num).toDouble();
-            final double xmax = (box[3] as num).toDouble();
-            
-            final double cx = ((xmin + xmax) / 2.0) / 1000.0;
-            final double cy = ((ymin + ymax) / 2.0) / 1000.0;
-            final double width = (xmax - xmin).abs() / 1000.0;
-            final double height = (ymax - ymin).abs() / 1000.0;
-            final double radius = (max(width, height) * 0.6).clamp(0.2, 0.5);
-            
-            String intent = jsonContent['mask_intent'] ?? 'highlight';
-            
-            AdjustmentMask newMask = AdjustmentMask(
-              id: DateTime.now().millisecondsSinceEpoch.toString(),
-              name: 'AI Mask',
-              centerX: cx,
-              centerY: cy,
-              radius: radius,
-              feather: 0.75,
-              exposure: intent == 'dim_background' ? -0.2 : 0.2,
-              isInverted: intent == 'dim_background',
-            );
-            
-            newState = newState.addMask(newMask);
-          }
-        }
+        debugPrint('[AI Pipeline] [$modelName] Response status: ${response.statusCode}');
 
-        debugPrint('[AI Pipeline] Parsed EditorState: ${jsonEncode(newState.toJson())}');
-        return newState;
-      } else {
-        throw Exception('Gemini API returned HTTP status ${response.statusCode}: ${response.body}');
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+          final contentText = data['candidates'][0]['content']['parts'][0]['text'];
+          debugPrint('[AI Pipeline] Raw Gemini response text: $contentText');
+
+          final cleanedJsonStr = sanitizeJson(contentText);
+          debugPrint('[AI Pipeline] Cleaned JSON string: $cleanedJsonStr');
+
+          final jsonContent = jsonDecode(cleanedJsonStr);
+          
+          double clampVal(dynamic val, double min, double max, double def) {
+            if (val == null || val is! num) return def;
+            return val.toDouble().clamp(min, max);
+          }
+
+          EditorState newState = currentState.copyWith(
+            exposure: clampVal(jsonContent['adjustments']['exposure'], -2.0, 2.0, currentState.exposure),
+            contrast: clampVal(jsonContent['adjustments']['contrast'], 0.5, 2.0, currentState.contrast),
+            highlights: clampVal(jsonContent['adjustments']['highlights'], -1.0, 1.0, currentState.highlights),
+            shadows: clampVal(jsonContent['adjustments']['shadows'], -1.0, 1.0, currentState.shadows),
+            whites: clampVal(jsonContent['adjustments']['whites'], -1.0, 1.0, currentState.whites),
+            blacks: clampVal(jsonContent['adjustments']['blacks'], -1.0, 1.0, currentState.blacks),
+            temperature: clampVal(jsonContent['adjustments']['temperature'], -1.0, 1.0, currentState.temperature),
+            tint: clampVal(jsonContent['adjustments']['tint'], -1.0, 1.0, currentState.tint),
+            saturation: clampVal(jsonContent['adjustments']['saturation'], 0.0, 2.0, currentState.saturation),
+            vibrance: clampVal(jsonContent['adjustments']['vibrance'], -1.0, 1.0, currentState.vibrance),
+            colorGradingShadowHue: clampVal(jsonContent['adjustments']['color_grading_shadow_hue'], 0.0, 360.0, currentState.colorGradingShadowHue),
+            colorGradingHighlightHue: clampVal(jsonContent['adjustments']['color_grading_highlight_hue'], 0.0, 360.0, currentState.colorGradingHighlightHue),
+            clarity: clampVal(jsonContent['adjustments']['clarity'], -1.0, 1.0, currentState.clarity),
+            sharpness: clampVal(jsonContent['adjustments']['sharpness'], 0.0, 1.0, currentState.sharpness),
+            grain: clampVal(jsonContent['adjustments']['grain'], 0.0, 1.0, currentState.grain),
+          );
+
+          if (jsonContent['target_box'] != null && jsonContent['target_box'] is List) {
+            final box = jsonContent['target_box'] as List;
+            if (box.length == 4) {
+              final double ymin = (box[0] as num).toDouble();
+              final double xmin = (box[1] as num).toDouble();
+              final double ymax = (box[2] as num).toDouble();
+              final double xmax = (box[3] as num).toDouble();
+              
+              final double cx = ((xmin + xmax) / 2.0) / 1000.0;
+              final double cy = ((ymin + ymax) / 2.0) / 1000.0;
+              final double width = (xmax - xmin).abs() / 1000.0;
+              final double height = (ymax - ymin).abs() / 1000.0;
+              final double radius = (max(width, height) * 0.6).clamp(0.2, 0.5);
+              
+              String intent = jsonContent['mask_intent'] ?? 'highlight';
+              
+              AdjustmentMask newMask = AdjustmentMask(
+                id: DateTime.now().millisecondsSinceEpoch.toString(),
+                name: 'AI Mask',
+                centerX: cx,
+                centerY: cy,
+                radius: radius,
+                feather: 0.75,
+                exposure: intent == 'dim_background' ? -0.2 : 0.2,
+                isInverted: intent == 'dim_background',
+              );
+              
+              newState = newState.addMask(newMask);
+            }
+          }
+
+          debugPrint('[AI Pipeline] Parsed EditorState using $modelName: ${jsonEncode(newState.toJson())}');
+          return newState;
+        } else if (response.statusCode == 404) {
+          lastErrorMsg = '404 NOT_FOUND for model $modelName: ${response.body}';
+          debugPrint('[AI Pipeline] $lastErrorMsg. Retrying with fallback model...');
+          continue;
+        } else {
+          throw Exception('Gemini API returned status ${response.statusCode}: ${response.body}');
+        }
+      } catch (e) {
+        if (e is Exception && e.toString().contains('404')) {
+          lastErrorMsg = e.toString();
+          continue;
+        }
+        rethrow;
       }
-    } catch (e, stackTrace) {
-      debugPrint('[ERROR] Gemini API Error: $e\n$stackTrace');
-      rethrow;
     }
+
+    throw Exception('Gemini API Error: All model endpoints returned NOT_FOUND. Please ensure your API Key is a valid Google AI Studio key (usually starting with AIzaSy) with Gemini API enabled.\nDetails: $lastErrorMsg');
   }
 }
