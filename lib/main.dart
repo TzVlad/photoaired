@@ -92,10 +92,8 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   XFile? _referenceImage;
   final GlobalKey _previewGlobalKey = GlobalKey();
   
-  static const String _geminiApiKey = String.fromEnvironment(
-    'GEMINI_API_KEY',
-    defaultValue: '',
-  );
+  // Повертаємо прямий ключ для стабільної роботи без налаштування прапорців компіляції
+  static const String _geminiApiKey = 'AQ.Ab8RN6Kztm9E0SzF9S6AXTSL8WotBaTPj6faoA7qKIJv8LnRQw';
 
   late final GeminiService _geminiService = GeminiService(_geminiApiKey);
 
