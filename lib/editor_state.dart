@@ -1,3 +1,81 @@
+class AdjustmentMask {
+  final String id;
+  final String name;
+  final double centerX; // 0.0 .. 1.0
+  final double centerY; // 0.0 .. 1.0
+  final double radius;  // 0.05 .. 1.0
+  final double feather; // 0.05 .. 1.0
+  final double exposure;// -1.0 .. 1.0
+  final bool isInverted;
+
+  const AdjustmentMask({
+    required this.id,
+    required this.name,
+    this.centerX = 0.5,
+    this.centerY = 0.5,
+    this.radius = 0.5,
+    this.feather = 0.5,
+    this.exposure = 0.0,
+    this.isInverted = false,
+  });
+
+  AdjustmentMask copyWith({
+    String? id,
+    String? name,
+    double? centerX,
+    double? centerY,
+    double? radius,
+    double? feather,
+    double? exposure,
+    bool? isInverted,
+  }) {
+    return AdjustmentMask(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      centerX: centerX ?? this.centerX,
+      centerY: centerY ?? this.centerY,
+      radius: radius ?? this.radius,
+      feather: feather ?? this.feather,
+      exposure: exposure ?? this.exposure,
+      isInverted: isInverted ?? this.isInverted,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'name': name,
+      'centerX': centerX,
+      'centerY': centerY,
+      'radius': radius,
+      'feather': feather,
+      'exposure': exposure,
+      'isInverted': isInverted,
+    };
+  }
+
+  factory AdjustmentMask.fromMap(Map<String, dynamic> map) {
+    double clamp(dynamic val, double min, double max, double def) {
+      if (val == null) return def;
+      double v = (val is num) ? val.toDouble() : def;
+      if (v < min) return min;
+      if (v > max) return max;
+      return v;
+    }
+
+    return AdjustmentMask(
+      id: map['id'] ?? '',
+      name: map['name'] ?? '',
+      centerX: clamp(map['centerX'], 0.0, 1.0, 0.5),
+      centerY: clamp(map['centerY'], 0.0, 1.0, 0.5),
+      radius: clamp(map['radius'], 0.05, 1.0, 0.5),
+      feather: clamp(map['feather'], 0.05, 1.0, 0.5),
+      exposure: clamp(map['exposure'], -1.0, 1.0, 0.0),
+      isInverted: map['isInverted'] ?? false,
+    );
+  }
+}
+
 class EditorState {
   // A. Tone & Exposure (Light)
   final double exposure;
@@ -21,12 +99,8 @@ class EditorState {
   final double grain;
 
   // D. Spatial Shading / Radial Mask
-  final double vignetteAmount;
-  final double vignetteRadius;
-  final double vignetteFeather;
-  final double maskCenterX;
-  final double maskCenterY;
-  final double maskAspectRatio;
+  final List<AdjustmentMask> masks;
+  final int selectedMaskIndex;
   final bool showMaskOverlay;
 
   const EditorState({
@@ -45,13 +119,9 @@ class EditorState {
     this.clarity = 0.0,
     this.sharpness = 0.0,
     this.grain = 0.0,
-    this.vignetteAmount = 0.0,
-    this.vignetteRadius = 0.8,
-    this.vignetteFeather = 0.6,
-    this.maskCenterX = 0.5,
-    this.maskCenterY = 0.5,
-    this.maskAspectRatio = 1.0,
-    this.showMaskOverlay = false,
+    this.masks = const [],
+    this.selectedMaskIndex = -1,
+    this.showMaskOverlay = true,
   });
 
   EditorState copyWith({
@@ -70,12 +140,8 @@ class EditorState {
     double? clarity,
     double? sharpness,
     double? grain,
-    double? vignetteAmount,
-    double? vignetteRadius,
-    double? vignetteFeather,
-    double? maskCenterX,
-    double? maskCenterY,
-    double? maskAspectRatio,
+    List<AdjustmentMask>? masks,
+    int? selectedMaskIndex,
     bool? showMaskOverlay,
   }) {
     return EditorState(
@@ -94,42 +160,64 @@ class EditorState {
       clarity: clarity ?? this.clarity,
       sharpness: sharpness ?? this.sharpness,
       grain: grain ?? this.grain,
-      vignetteAmount: vignetteAmount ?? this.vignetteAmount,
-      vignetteRadius: vignetteRadius ?? this.vignetteRadius,
-      vignetteFeather: vignetteFeather ?? this.vignetteFeather,
-      maskCenterX: maskCenterX ?? this.maskCenterX,
-      maskCenterY: maskCenterY ?? this.maskCenterY,
-      maskAspectRatio: maskAspectRatio ?? this.maskAspectRatio,
+      masks: masks ?? this.masks,
+      selectedMaskIndex: selectedMaskIndex ?? this.selectedMaskIndex,
       showMaskOverlay: showMaskOverlay ?? this.showMaskOverlay,
     );
   }
-
-  static EditorState lerp(EditorState a, EditorState b, double t) {
-    double l(double x, double y) => x + (y - x) * t;
+  
+  EditorState lerpTo(EditorState target, double t) {
+    double lerp(double a, double b, double t) => a + (b - a) * t;
     return EditorState(
-      exposure: l(a.exposure, b.exposure),
-      contrast: l(a.contrast, b.contrast),
-      highlights: l(a.highlights, b.highlights),
-      shadows: l(a.shadows, b.shadows),
-      whites: l(a.whites, b.whites),
-      blacks: l(a.blacks, b.blacks),
-      temperature: l(a.temperature, b.temperature),
-      tint: l(a.tint, b.tint),
-      saturation: l(a.saturation, b.saturation),
-      vibrance: l(a.vibrance, b.vibrance),
-      colorGradingShadowHue: l(a.colorGradingShadowHue, b.colorGradingShadowHue),
-      colorGradingHighlightHue: l(a.colorGradingHighlightHue, b.colorGradingHighlightHue),
-      clarity: l(a.clarity, b.clarity),
-      sharpness: l(a.sharpness, b.sharpness),
-      grain: l(a.grain, b.grain),
-      vignetteAmount: l(a.vignetteAmount, b.vignetteAmount),
-      vignetteRadius: l(a.vignetteRadius, b.vignetteRadius),
-      vignetteFeather: l(a.vignetteFeather, b.vignetteFeather),
-      maskCenterX: l(a.maskCenterX, b.maskCenterX),
-      maskCenterY: l(a.maskCenterY, b.maskCenterY),
-      maskAspectRatio: l(a.maskAspectRatio, b.maskAspectRatio),
-      showMaskOverlay: t > 0.5 ? b.showMaskOverlay : a.showMaskOverlay,
+      exposure: lerp(exposure, target.exposure, t),
+      contrast: lerp(contrast, target.contrast, t),
+      highlights: lerp(highlights, target.highlights, t),
+      shadows: lerp(shadows, target.shadows, t),
+      whites: lerp(whites, target.whites, t),
+      blacks: lerp(blacks, target.blacks, t),
+      temperature: lerp(temperature, target.temperature, t),
+      tint: lerp(tint, target.tint, t),
+      saturation: lerp(saturation, target.saturation, t),
+      vibrance: lerp(vibrance, target.vibrance, t),
+      colorGradingShadowHue: lerp(colorGradingShadowHue, target.colorGradingShadowHue, t),
+      colorGradingHighlightHue: lerp(colorGradingHighlightHue, target.colorGradingHighlightHue, t),
+      clarity: lerp(clarity, target.clarity, t),
+      sharpness: lerp(sharpness, target.sharpness, t),
+      grain: lerp(grain, target.grain, t),
+      masks: t > 0.5 ? target.masks : masks,
+      selectedMaskIndex: t > 0.5 ? target.selectedMaskIndex : selectedMaskIndex,
+      showMaskOverlay: t > 0.5 ? target.showMaskOverlay : showMaskOverlay,
     );
+  }
+  
+  EditorState addMask(AdjustmentMask mask) {
+    if (masks.length >= 4) return this;
+    final newMasks = List<AdjustmentMask>.from(masks)..add(mask);
+    return copyWith(masks: newMasks, selectedMaskIndex: newMasks.length - 1);
+  }
+
+  EditorState removeMask(int index) {
+    if (index < 0 || index >= masks.length) return this;
+    final newMasks = List<AdjustmentMask>.from(masks)..removeAt(index);
+    int newSelectedIndex = selectedMaskIndex;
+    if (newSelectedIndex == index) {
+      newSelectedIndex = newMasks.isNotEmpty ? newMasks.length - 1 : -1;
+    } else if (newSelectedIndex > index) {
+      newSelectedIndex--;
+    }
+    return copyWith(masks: newMasks, selectedMaskIndex: newSelectedIndex);
+  }
+
+  EditorState updateActiveMask(AdjustmentMask mask) {
+    if (selectedMaskIndex < 0 || selectedMaskIndex >= masks.length) return this;
+    final newMasks = List<AdjustmentMask>.from(masks);
+    newMasks[selectedMaskIndex] = mask;
+    return copyWith(masks: newMasks);
+  }
+
+  EditorState selectMask(int index) {
+    if (index < -1 || index >= masks.length) return this;
+    return copyWith(selectedMaskIndex: index);
   }
 
   factory EditorState.fromJson(Map<String, dynamic> json) {
@@ -139,6 +227,11 @@ class EditorState {
       if (v < min) return min;
       if (v > max) return max;
       return v;
+    }
+
+    List<AdjustmentMask> parsedMasks = [];
+    if (json['masks'] != null && json['masks'] is List) {
+      parsedMasks = (json['masks'] as List).map((m) => AdjustmentMask.fromMap(m)).toList();
     }
 
     return EditorState(
@@ -157,12 +250,9 @@ class EditorState {
       clarity: clamp(json['clarity'], -1.0, 1.0, 0.0),
       sharpness: clamp(json['sharpness'], 0.0, 1.0, 0.0),
       grain: clamp(json['grain'], 0.0, 1.0, 0.0),
-      vignetteAmount: clamp(json['vignetteAmount'] ?? json['vignette_amount'], -1.0, 1.0, 0.0),
-      vignetteRadius: clamp(json['vignetteRadius'] ?? json['vignette_radius'], 0.1, 1.5, 0.8),
-      vignetteFeather: clamp(json['vignetteFeather'] ?? json['vignette_feather'], 0.0, 1.0, 0.6),
-      maskCenterX: clamp(json['maskCenterX'] ?? json['mask_center_x'], 0.0, 1.0, 0.5),
-      maskCenterY: clamp(json['maskCenterY'] ?? json['mask_center_y'], 0.0, 1.0, 0.5),
-      maskAspectRatio: clamp(json['maskAspectRatio'] ?? json['mask_aspect_ratio'], 0.5, 2.0, 1.0),
+      masks: parsedMasks,
+      selectedMaskIndex: json['selectedMaskIndex'] ?? (parsedMasks.isNotEmpty ? 0 : -1),
+      showMaskOverlay: json['showMaskOverlay'] ?? true,
     );
   }
 
@@ -182,11 +272,8 @@ class EditorState {
         'clarity': clarity,
         'sharpness': sharpness,
         'grain': grain,
-        'vignette_amount': vignetteAmount,
-        'vignette_radius': vignetteRadius,
-        'vignette_feather': vignetteFeather,
-        'mask_center_x': maskCenterX,
-        'mask_center_y': maskCenterY,
-        'mask_aspect_ratio': maskAspectRatio,
+        'masks': masks.map((m) => m.toMap()).toList(),
+        'selectedMaskIndex': selectedMaskIndex,
+        'showMaskOverlay': showMaskOverlay,
       };
 }

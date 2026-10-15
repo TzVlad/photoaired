@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
-import 'dart:ui';
+import 'package:flutter/rendering.dart';
+import 'dart:ui' as ui;
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
+import 'package:gal/gal.dart';
 import 'editor_state.dart';
 import 'gemini_service.dart';
 
@@ -8,10 +12,12 @@ void main() {
 }
 
 class AppColors {
-  static const Color background = Color(0xFF121212);
-  static const Color panel = Color(0xFF1C1C1E);
-  static const Color border = Color(0xFF2C2C2E);
-  static const Color accent = Color(0xFF6366F1);
+  static const Color background = Color(0xFF000000);
+  static const Color panel = Color(0xFF18181A);
+  static const Color border = Color(0xFF28282A);
+  static const Color accent = Color(0xFFFFFFFF);
+  static const Color activeThumb = Color(0xFFFFFFFF);
+  static const Color inactiveTrack = Color(0xFF333333);
   static const Color secondaryText = Color(0xFF9CA3AF);
 }
 
@@ -30,20 +36,20 @@ class PhotoEditorApp extends StatelessWidget {
           primary: AppColors.accent,
           surface: AppColors.panel,
         ),
-        sliderTheme: SliderThemeData(
+        sliderTheme: const SliderThemeData(
           activeTrackColor: AppColors.accent,
-          inactiveTrackColor: AppColors.border,
-          thumbColor: Colors.white,
-          trackHeight: 2.5,
-          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.0, elevation: 0, pressedElevation: 0),
-          overlayShape: const RoundSliderOverlayShape(overlayRadius: 14.0),
-          overlayColor: AppColors.accent.withOpacity(0.15),
+          inactiveTrackColor: AppColors.inactiveTrack,
+          thumbColor: AppColors.activeThumb,
+          trackHeight: 2.0,
+          thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6.0, elevation: 0, pressedElevation: 0),
+          overlayShape: RoundSliderOverlayShape(overlayRadius: 14.0),
+          overlayColor: Colors.transparent,
         ),
         chipTheme: ChipThemeData(
           backgroundColor: AppColors.panel,
-          selectedColor: AppColors.accent.withOpacity(0.15),
+          selectedColor: Colors.white24,
           labelStyle: const TextStyle(color: Colors.white),
-          secondaryLabelStyle: const TextStyle(color: AppColors.accent),
+          secondaryLabelStyle: const TextStyle(color: Colors.white),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
             side: const BorderSide(color: AppColors.border),
@@ -62,13 +68,24 @@ class EditorScreen extends StatefulWidget {
   State<EditorScreen> createState() => _EditorScreenState();
 }
 
-class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderStateMixin {
+class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMixin {
   EditorState _state = const EditorState();
   final EditorState _originalState = const EditorState();
   final TextEditingController _promptController = TextEditingController();
+  final FocusNode _promptFocusNode = FocusNode();
   bool _isLoading = false;
   bool _showOriginal = false;
+  bool _isTourPlaying = false;
   late TabController _tabController;
+  
+  final List<EditorState> _undoStack = [];
+  final List<EditorState> _redoStack = [];
+  XFile? _referenceImage;
+  final GlobalKey _previewGlobalKey = GlobalKey();
+
+  late AnimationController _aiAnimationController;
+  late EditorState _animStartState;
+  late EditorState _animTargetState;
   
   late final GeminiService _geminiService = GeminiService('AQ.Ab8RN6Jiqr68UTqaX58ECo-nk4aoInOXYDh04nLVirlWo164RA');
 
@@ -87,7 +104,73 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   void dispose() {
     _tabController.dispose();
     _promptController.dispose();
+    _promptFocusNode.dispose();
     super.dispose();
+  }
+
+  void _pushUndoState() {
+    _undoStack.add(_state);
+    if (_undoStack.length > 30) _undoStack.removeAt(0);
+    _redoStack.clear();
+  }
+
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    setState(() {
+      _redoStack.add(_state);
+      _state = _undoStack.removeLast();
+    });
+  }
+
+  void _redo() {
+    if (_redoStack.isEmpty) return;
+    setState(() {
+      _undoStack.add(_state);
+      _state = _redoStack.removeLast();
+    });
+  }
+
+  Future<void> _exportImage() async {
+    try {
+      final boundary = _previewGlobalKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) return;
+      
+      // Request access to save photos
+      bool hasAccess = await Gal.hasAccess(toAlbum: true);
+      if (!hasAccess) {
+        hasAccess = await Gal.requestAccess(toAlbum: true);
+      }
+      if (!hasAccess) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Access denied')));
+        }
+        return;
+      }
+
+      final image = await boundary.toImage(pixelRatio: 2.0);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      final bytes = byteData?.buffer.asUint8List();
+      if (bytes != null) {
+        await Gal.putImageBytes(bytes);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Photo saved to gallery')));
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving: $e')));
+      }
+    }
+  }
+
+  Future<void> _pickReferenceImage() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery, maxWidth: 1024, maxHeight: 1024);
+    if (picked != null) {
+      setState(() {
+        _referenceImage = picked;
+      });
+    }
   }
 
   List<double> _buildColorMatrix(EditorState state) {
@@ -126,31 +209,221 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   void _updateState(EditorState newState) {
     setState(() {
       _state = newState;
+      _imageState = newState;
     });
+  }
+
+  bool _hasLightDelta(EditorState a, EditorState b) {
+    return a.exposure != b.exposure || a.contrast != b.contrast || a.highlights != b.highlights || a.shadows != b.shadows || a.whites != b.whites || a.blacks != b.blacks;
+  }
+
+  bool _hasColorDelta(EditorState a, EditorState b) {
+    return a.temperature != b.temperature || a.tint != b.tint || a.saturation != b.saturation || a.vibrance != b.vibrance || a.colorGradingShadowHue != b.colorGradingShadowHue || a.colorGradingHighlightHue != b.colorGradingHighlightHue;
+  }
+
+  bool _hasDetailDelta(EditorState a, EditorState b) {
+    return a.clarity != b.clarity || a.sharpness != b.sharpness || a.grain != b.grain;
+  }
+
+  EditorState _mergeTabState(EditorState current, EditorState target, int tabIndex) {
+    if (tabIndex == 0) {
+      return current.copyWith(
+        exposure: target.exposure,
+        contrast: target.contrast,
+        highlights: target.highlights,
+        shadows: target.shadows,
+        whites: target.whites,
+        blacks: target.blacks,
+      );
+    } else if (tabIndex == 1) {
+      return current.copyWith(
+        temperature: target.temperature,
+        tint: target.tint,
+        saturation: target.saturation,
+        vibrance: target.vibrance,
+        colorGradingShadowHue: target.colorGradingShadowHue,
+        colorGradingHighlightHue: target.colorGradingHighlightHue,
+      );
+    } else if (tabIndex == 2) {
+      return current.copyWith(
+        clarity: target.clarity,
+        sharpness: target.sharpness,
+        grain: target.grain,
+      );
+    } else if (tabIndex == 3) {
+      return current.copyWith(
+        masks: target.masks,
+        selectedMaskIndex: target.selectedMaskIndex,
+      );
+    }
+    return current;
+  }
+
+  Future<void> _animateStateTransition({
+    required EditorState from,
+    required EditorState to,
+    required Duration duration,
+    required Curve curve,
+  }) async {
+    final controller = AnimationController(vsync: this, duration: duration);
+    final curvedAnim = CurvedAnimation(parent: controller, curve: curve);
+
+    controller.addListener(() {
+      if (mounted) {
+        setState(() {
+          _state = from.lerpTo(to, curvedAnim.value);
+        });
+      }
+    });
+
+    await controller.forward();
+    controller.dispose();
+  }
+
+  Future<void> _runSynchronizedTour(EditorState initialState, EditorState finalTargetState) async {
+    if (!mounted) return;
+    setState(() => _isTourPlaying = true);
+
+    EditorState progressingState = initialState;
+
+    final steps = <int>[];
+    if (_hasLightDelta(initialState, finalTargetState)) steps.add(0);
+    if (_hasColorDelta(initialState, finalTargetState)) steps.add(1);
+    if (_hasDetailDelta(initialState, finalTargetState)) steps.add(2);
+    if (initialState.masks.length != finalTargetState.masks.length) steps.add(3);
+
+    try {
+      for (final tabIndex in steps) {
+        if (!mounted) return;
+        
+        _tabController.animateTo(tabIndex);
+        await Future.delayed(const Duration(milliseconds: 60));
+
+        if (!mounted) return;
+        final stepTargetState = _mergeTabState(progressingState, finalTargetState, tabIndex);
+
+        await _animateStateTransition(
+          from: progressingState,
+          to: stepTargetState,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+        );
+
+        progressingState = stepTargetState;
+        if (!mounted) return;
+        await Future.delayed(const Duration(milliseconds: 120));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _state = finalTargetState;
+          _isTourPlaying = false;
+        });
+      }
+    }
   }
 
   Future<void> _applyAI() async {
     final prompt = _promptController.text.trim();
     if (prompt.isEmpty) return;
+    
+    _promptFocusNode.unfocus();
 
     setState(() {
       _isLoading = true;
     });
 
-    final newState = await _geminiService.analyzePrompt(prompt, _state);
+    final referenceBytes = _referenceImage != null ? await _referenceImage!.readAsBytes() : null;
+    final newState = await _geminiService.analyzePrompt(prompt, _originalState, referenceImageBytes: referenceBytes);
     
-    setState(() {
-      _isLoading = false;
-      if (newState != null) {
-        _state = newState;
-      }
-    });
+    if (newState != null) {
+      _pushUndoState();
+      final combinedMasks = List<AdjustmentMask>.from(_state.masks)..addAll(newState.masks);
+      
+      final animStartState = _state;
+      final animTargetState = newState.copyWith(masks: combinedMasks);
+      
+      setState(() {
+        _isLoading = false;
+      });
+      
+      await _runSynchronizedTour(animStartState, animTargetState);
+    } else {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  bool _isEdited(int index) {
+    if (index == 0) {
+      return _state.exposure != 0 || _state.contrast != 1.0 || _state.highlights != 0 || _state.shadows != 0 || _state.whites != 0 || _state.blacks != 0;
+    } else if (index == 1) {
+      return _state.temperature != 0 || _state.tint != 0 || _state.saturation != 1.0 || _state.vibrance != 0 || _state.colorGradingShadowHue != 0 || _state.colorGradingHighlightHue != 0;
+    } else if (index == 2) {
+      return _state.clarity != 0 || _state.sharpness != 0 || _state.grain != 0;
+    } else if (index == 3) {
+      return _state.masks.isNotEmpty;
+    }
+    return false;
+  }
+
+  Widget _buildPillTabs() {
+    final tabs = ['Light', 'Color', 'Detail', 'Mask'];
+    return Container(
+      height: 36,
+      margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: List.generate(tabs.length, (index) {
+          final isActive = _tabController.index == index;
+          final isEdited = _isEdited(index);
+          return GestureDetector(
+            onTap: () => _tabController.animateTo(index),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              decoration: BoxDecoration(
+                color: isActive ? Colors.white : Colors.white.withAlpha(20),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    tabs[index],
+                    style: TextStyle(
+                      color: isActive ? Colors.black : Colors.white,
+                      fontWeight: isActive ? FontWeight.bold : FontWeight.w500,
+                      fontSize: 13,
+                    ),
+                  ),
+                  if (isEdited) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      width: 4,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isActive ? Colors.black : Colors.white,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        }),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+
     return Scaffold(
       backgroundColor: AppColors.background,
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
         bottom: false,
         child: Column(
@@ -158,17 +431,23 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             EditorTopBar(
               onShowOriginalDown: () => setState(() => _showOriginal = true),
               onShowOriginalUp: () => setState(() => _showOriginal = false),
+              canUndo: _undoStack.isNotEmpty,
+              canRedo: _redoStack.isNotEmpty,
+              onUndo: _undo,
+              onRedo: _redo,
+              onExport: _exportImage,
             ),
-            
             Expanded(
               child: ClipRect(
                 child: InteractiveViewer(
                   minScale: 0.5,
                   maxScale: 4.0,
                   child: Center(
-                    child: Stack(
-                      fit: StackFit.loose,
-                      children: [
+                    child: RepaintBoundary(
+                      key: _previewGlobalKey,
+                      child: Stack(
+                        fit: StackFit.loose,
+                        children: [
                         ColorFiltered(
                           colorFilter: ColorFilter.matrix(_buildColorMatrix(_showOriginal ? _originalState : _state)),
                           child: Image.network(
@@ -201,51 +480,50 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
                           ),
                       ],
                     ),
+                    ),
                   ),
                 ),
               ),
             ),
             
-            Container(
-              margin: const EdgeInsets.only(top: 8.0),
-              decoration: const BoxDecoration(
-                color: AppColors.panel,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-                border: Border(top: BorderSide(color: AppColors.border, width: 1)),
-              ),
-              child: SafeArea(
-                top: false,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const SizedBox(height: 12),
-                    Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: AppColors.secondaryText.withOpacity(0.3),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-
-                    SizedBox(
-                      height: 220,
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 200),
-                        transitionBuilder: (Widget child, Animation<double> animation) {
-                          return FadeTransition(opacity: animation, child: child);
-                        },
-                        child: _buildCurrentPanel(),
-                      ),
-                    ),
-                    
-                    _buildPromptBar(),
-                    
-                    EditorBottomBar(tabController: _tabController),
-                  ],
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOutCubic,
+                  child: isKeyboardOpen
+                      ? const SizedBox(width: double.infinity, height: 0)
+                      : IgnorePointer(
+                          ignoring: _isTourPlaying,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildPillTabs(),
+                              Container(
+                                margin: const EdgeInsets.symmetric(horizontal: 8.0),
+                                decoration: BoxDecoration(
+                                  color: AppColors.panel,
+                                  borderRadius: BorderRadius.circular(24),
+                                  border: Border.all(color: AppColors.border, width: 1),
+                                ),
+                                child: SizedBox(
+                                  height: 220,
+                                  child: AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 200),
+                                    transitionBuilder: (Widget child, Animation<double> animation) {
+                                      return FadeTransition(opacity: animation, child: child);
+                                    },
+                                    child: _buildCurrentPanel(),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                 ),
-              ),
+                _buildPromptBar(),
+              ],
             ),
           ],
         ),
@@ -256,40 +534,85 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
   Widget _buildCurrentPanel() {
     switch (_tabController.index) {
       case 0:
-        return AdjustControlPanel(key: const ValueKey(0), state: _state, onChanged: _updateState);
+        return AdjustControlPanel(key: const ValueKey(0), state: _state, onChanged: _updateState, onChangeStart: _pushUndoState);
       case 1:
-        return ColorControlPanel(key: const ValueKey(1), state: _state, onChanged: _updateState);
+        return ColorControlPanel(key: const ValueKey(1), state: _state, onChanged: _updateState, onChangeStart: _pushUndoState);
       case 2:
-        return DetailControlPanel(key: const ValueKey(2), state: _state, onChanged: _updateState);
+        return DetailControlPanel(key: const ValueKey(2), state: _state, onChanged: _updateState, onChangeStart: _pushUndoState);
       case 3:
-        return MaskControlPanel(key: const ValueKey(3), state: _state, onChanged: _updateState);
+        return MaskControlPanel(key: const ValueKey(3), state: _state, onChanged: _updateState, onChangeStart: _pushUndoState);
       default:
         return const SizedBox.shrink(key: ValueKey(-1));
     }
   }
 
   Widget _buildPromptBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-      color: AppColors.panel,
+    return SafeArea(
+      top: false,
       child: Container(
-        padding: const EdgeInsets.only(left: 14.0, right: 6.0, top: 4.0, bottom: 4.0),
-        decoration: BoxDecoration(
-          color: const Color(0xFF141414),
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: const Color(0xFF2A2A2A)),
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+        color: AppColors.background,
         child: Row(
           children: [
-            const Icon(Icons.auto_awesome, color: AppColors.accent, size: 18),
-            const SizedBox(width: 10),
+            Container(
+              width: 36,
+              height: 36,
+              decoration: const BoxDecoration(
+                color: Color(0xFF222222),
+                shape: BoxShape.circle,
+              ),
+              child: IconButton(
+                padding: EdgeInsets.zero,
+                icon: const Icon(Icons.attach_file, color: Colors.grey, size: 18),
+                onPressed: _pickReferenceImage,
+              ),
+            ),
+            if (_referenceImage != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 8.0),
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.file(
+                        File(_referenceImage!.path),
+                        width: 28,
+                        height: 28,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    Positioned(
+                      top: -12,
+                      right: -12,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => setState(() => _referenceImage = null),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Container(
+                            padding: const EdgeInsets.all(3),
+                            decoration: const BoxDecoration(
+                              color: Colors.black87,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.close, size: 10, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(width: 12),
             Expanded(
               child: TextField(
                 controller: _promptController,
-                style: const TextStyle(color: Colors.white, fontSize: 13),
+                focusNode: _promptFocusNode,
+                style: const TextStyle(color: Colors.white, fontSize: 14),
                 decoration: const InputDecoration(
-                  hintText: 'Ask AI to edit...',
-                  hintStyle: TextStyle(color: AppColors.secondaryText, fontSize: 13),
+                  hintText: 'cinematic moody warm low-key...',
+                  hintStyle: TextStyle(color: Color(0xFF666666), fontSize: 14),
                   border: InputBorder.none,
                   isDense: true,
                   contentPadding: EdgeInsets.symmetric(vertical: 8),
@@ -298,22 +621,25 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
             ),
             if (_isLoading)
               const Padding(
-                padding: EdgeInsets.only(right: 12.0),
+                padding: EdgeInsets.symmetric(horizontal: 16.0),
                 child: SizedBox(
-                  width: 18, height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent),
+                  width: 20, height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                 ),
               )
             else
               GestureDetector(
                 onTap: _applyAI,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   decoration: BoxDecoration(
-                    color: AppColors.accent,
+                    color: Colors.white,
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: const Text('Apply', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                  child: const Text(
+                    'Apply',
+                    style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 13),
+                  ),
                 ),
               ),
           ],
@@ -326,43 +652,77 @@ class _EditorScreenState extends State<EditorScreen> with SingleTickerProviderSt
 class EditorTopBar extends StatelessWidget {
   final VoidCallback onShowOriginalDown;
   final VoidCallback onShowOriginalUp;
+  final bool canUndo;
+  final bool canRedo;
+  final VoidCallback onUndo;
+  final VoidCallback onRedo;
+  final VoidCallback onExport;
 
-  const EditorTopBar({super.key, required this.onShowOriginalDown, required this.onShowOriginalUp});
+  const EditorTopBar({
+    super.key, 
+    required this.onShowOriginalDown, 
+    required this.onShowOriginalUp,
+    required this.canUndo,
+    required this.canRedo,
+    required this.onUndo,
+    required this.onRedo,
+    required this.onExport,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      height: 48,
+      color: Colors.transparent,
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
-            icon: const Icon(Icons.close, color: Colors.white),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            icon: const Icon(Icons.close, color: Colors.white, size: 22),
             onPressed: () {},
           ),
           Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(icon: const Icon(Icons.undo, color: AppColors.secondaryText), onPressed: () {}),
-              IconButton(icon: const Icon(Icons.redo, color: AppColors.secondaryText), onPressed: () {}),
+              IconButton(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 40),
+                icon: Icon(Icons.undo, size: 20, color: canUndo ? Colors.white : const Color(0xFF3A3A3C)),
+                onPressed: canUndo ? onUndo : null,
+              ),
+              IconButton(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 40),
+                icon: Icon(Icons.redo, size: 20, color: canRedo ? Colors.white : const Color(0xFF3A3A3C)),
+                onPressed: canRedo ? onRedo : null,
+              ),
               GestureDetector(
                 onTapDown: (_) => onShowOriginalDown(),
                 onTapUp: (_) => onShowOriginalUp(),
                 onTapCancel: () => onShowOriginalUp(),
                 child: const Padding(
-                  padding: EdgeInsets.all(8.0),
-                  child: Icon(Icons.compare, color: Colors.white),
+                  padding: EdgeInsets.symmetric(horizontal: 8.0),
+                  child: Icon(Icons.visibility_outlined, color: Color(0xFF8E8E93), size: 22),
                 ),
               ),
             ],
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: AppColors.accent,
-              borderRadius: BorderRadius.circular(20),
+          GestureDetector(
+            onTap: onExport,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: const Text(
+                'Export',
+                style: TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.w700),
+              ),
             ),
-            child: const Text('Export', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
           ),
         ],
       ),
@@ -370,40 +730,8 @@ class EditorTopBar extends StatelessWidget {
   }
 }
 
-class EditorBottomBar extends StatelessWidget {
-  final TabController tabController;
-
-  const EditorBottomBar({super.key, required this.tabController});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: AppColors.panel,
-      child: TabBar(
-        controller: tabController,
-        isScrollable: false,
-        dividerColor: Colors.transparent,
-        indicator: BoxDecoration(
-          color: const Color(0xFF2A2A2C),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        indicatorSize: TabBarIndicatorSize.tab,
-        indicatorPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        labelColor: Colors.white,
-        unselectedLabelColor: AppColors.secondaryText,
-        labelStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-        tabs: const [
-          Tab(text: 'Light', iconMargin: EdgeInsets.only(bottom: 4), icon: Icon(Icons.light_mode, size: 18)),
-          Tab(text: 'Color', iconMargin: EdgeInsets.only(bottom: 4), icon: Icon(Icons.color_lens, size: 18)),
-          Tab(text: 'Detail', iconMargin: EdgeInsets.only(bottom: 4), icon: Icon(Icons.details, size: 18)),
-          Tab(text: 'Mask', iconMargin: EdgeInsets.only(bottom: 4), icon: Icon(Icons.masks, size: 18)),
-        ],
-      ),
-    );
-  }
-}
-
-Widget _buildEditorSlider(String label, double value, double min, double max, double defaultValue, void Function(double) onChanged) {
+Widget _buildEditorSlider(String label, double value, double min, double max, double defaultValue, void Function(double) onChanged, void Function(double)? onChangeStart) {
+  final safeValue = value.clamp(min, max);
   return Padding(
     padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 16.0),
     child: Column(
@@ -413,28 +741,22 @@ Widget _buildEditorSlider(String label, double value, double min, double max, do
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: const Color(0xFF2A2A2C),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                value.toStringAsFixed(2), 
-                style: const TextStyle(
-                  color: AppColors.secondaryText, 
-                  fontSize: 11,
-                  fontFeatures: [FontFeature.tabularFigures()]
-                )
-              ),
+            Text(
+              safeValue.toStringAsFixed(2), 
+              style: const TextStyle(
+                color: Colors.white70, 
+                fontSize: 12,
+                fontFeatures: [FontFeature.tabularFigures()]
+              )
             ),
           ],
         ),
         Slider(
-          value: value,
+          value: safeValue,
           min: min,
           max: max,
           onChanged: onChanged,
+          onChangeStart: onChangeStart,
         ),
       ],
     ),
@@ -444,8 +766,9 @@ Widget _buildEditorSlider(String label, double value, double min, double max, do
 class AdjustControlPanel extends StatelessWidget {
   final EditorState state;
   final ValueChanged<EditorState> onChanged;
+  final VoidCallback onChangeStart;
 
-  const AdjustControlPanel({super.key, required this.state, required this.onChanged});
+  const AdjustControlPanel({super.key, required this.state, required this.onChanged, required this.onChangeStart});
 
   @override
   Widget build(BuildContext context) {
@@ -455,12 +778,12 @@ class AdjustControlPanel extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12.0),
         child: Column(
           children: [
-            _buildEditorSlider('Exposure', state.exposure, -2.0, 2.0, 0.0, (v) => onChanged(state.copyWith(exposure: v))),
-            _buildEditorSlider('Contrast', state.contrast, 0.5, 2.0, 1.0, (v) => onChanged(state.copyWith(contrast: v))),
-            _buildEditorSlider('Highlights', state.highlights, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(highlights: v))),
-            _buildEditorSlider('Shadows', state.shadows, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(shadows: v))),
-            _buildEditorSlider('Whites', state.whites, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(whites: v))),
-            _buildEditorSlider('Blacks', state.blacks, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(blacks: v))),
+            _buildEditorSlider('Exposure', state.exposure, -2.0, 2.0, 0.0, (v) => onChanged(state.copyWith(exposure: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Contrast', state.contrast, 0.5, 2.0, 1.0, (v) => onChanged(state.copyWith(contrast: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Highlights', state.highlights, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(highlights: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Shadows', state.shadows, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(shadows: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Whites', state.whites, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(whites: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Blacks', state.blacks, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(blacks: v)), (_) => onChangeStart()),
           ],
         ),
       ),
@@ -471,8 +794,9 @@ class AdjustControlPanel extends StatelessWidget {
 class ColorControlPanel extends StatelessWidget {
   final EditorState state;
   final ValueChanged<EditorState> onChanged;
+  final VoidCallback onChangeStart;
 
-  const ColorControlPanel({super.key, required this.state, required this.onChanged});
+  const ColorControlPanel({super.key, required this.state, required this.onChanged, required this.onChangeStart});
 
   @override
   Widget build(BuildContext context) {
@@ -482,12 +806,12 @@ class ColorControlPanel extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12.0),
         child: Column(
           children: [
-            _buildEditorSlider('Temperature', state.temperature, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(temperature: v))),
-            _buildEditorSlider('Tint', state.tint, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(tint: v))),
-            _buildEditorSlider('Saturation', state.saturation, 0.0, 2.0, 1.0, (v) => onChanged(state.copyWith(saturation: v))),
-            _buildEditorSlider('Vibrance', state.vibrance, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(vibrance: v))),
-            _buildEditorSlider('Color Grading Shadow Hue', state.colorGradingShadowHue, 0.0, 360.0, 0.0, (v) => onChanged(state.copyWith(colorGradingShadowHue: v))),
-            _buildEditorSlider('Color Grading Highlight Hue', state.colorGradingHighlightHue, 0.0, 360.0, 0.0, (v) => onChanged(state.copyWith(colorGradingHighlightHue: v))),
+            _buildEditorSlider('Temperature', state.temperature, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(temperature: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Tint', state.tint, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(tint: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Saturation', state.saturation, 0.0, 2.0, 1.0, (v) => onChanged(state.copyWith(saturation: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Vibrance', state.vibrance, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(vibrance: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Color Grading Shadow Hue', state.colorGradingShadowHue, 0.0, 360.0, 0.0, (v) => onChanged(state.copyWith(colorGradingShadowHue: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Color Grading Highlight Hue', state.colorGradingHighlightHue, 0.0, 360.0, 0.0, (v) => onChanged(state.copyWith(colorGradingHighlightHue: v)), (_) => onChangeStart()),
           ],
         ),
       ),
@@ -498,8 +822,9 @@ class ColorControlPanel extends StatelessWidget {
 class DetailControlPanel extends StatelessWidget {
   final EditorState state;
   final ValueChanged<EditorState> onChanged;
+  final VoidCallback onChangeStart;
 
-  const DetailControlPanel({super.key, required this.state, required this.onChanged});
+  const DetailControlPanel({super.key, required this.state, required this.onChanged, required this.onChangeStart});
 
   @override
   Widget build(BuildContext context) {
@@ -509,9 +834,9 @@ class DetailControlPanel extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12.0),
         child: Column(
           children: [
-            _buildEditorSlider('Clarity', state.clarity, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(clarity: v))),
-            _buildEditorSlider('Sharpness', state.sharpness, 0.0, 1.0, 0.0, (v) => onChanged(state.copyWith(sharpness: v))),
-            _buildEditorSlider('Grain', state.grain, 0.0, 1.0, 0.0, (v) => onChanged(state.copyWith(grain: v))),
+            _buildEditorSlider('Clarity', state.clarity, -1.0, 1.0, 0.0, (v) => onChanged(state.copyWith(clarity: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Sharpness', state.sharpness, 0.0, 1.0, 0.0, (v) => onChanged(state.copyWith(sharpness: v)), (_) => onChangeStart()),
+            _buildEditorSlider('Grain', state.grain, 0.0, 1.0, 0.0, (v) => onChanged(state.copyWith(grain: v)), (_) => onChangeStart()),
           ],
         ),
       ),
@@ -522,8 +847,9 @@ class DetailControlPanel extends StatelessWidget {
 class MaskControlPanel extends StatelessWidget {
   final EditorState state;
   final ValueChanged<EditorState> onChanged;
+  final VoidCallback onChangeStart;
 
-  const MaskControlPanel({super.key, required this.state, required this.onChanged});
+  const MaskControlPanel({super.key, required this.state, required this.onChanged, required this.onChangeStart});
 
   @override
   Widget build(BuildContext context) {
@@ -532,27 +858,33 @@ class MaskControlPanel extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.format_shapes, size: 28, color: AppColors.secondaryText),
+            const Icon(Icons.format_shapes, size: 28, color: Color(0xFF666666)),
             const SizedBox(height: 12),
-            const Text('Немає активних масок', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
+            const Text('No active masks', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
             const SizedBox(height: 16),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.border,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              ),
-              onPressed: () {
+            GestureDetector(
+              onTap: () {
                 final newMask = AdjustmentMask(
                   id: DateTime.now().millisecondsSinceEpoch.toString(),
                   name: 'Mask 1',
                 );
                 onChanged(state.addMask(newMask));
               },
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text('Додати першу маску', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(25),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.add, size: 16, color: Colors.white),
+                    SizedBox(width: 6),
+                    Text('Add Mask', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
@@ -571,8 +903,8 @@ class MaskControlPanel extends StatelessWidget {
             children: [
               if (state.masks.length < 4)
                 ActionChip(
-                  label: const Text('+ New', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                  backgroundColor: AppColors.border.withOpacity(0.5),
+                  label: const Text('+ New', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.white)),
+                  backgroundColor: Colors.white.withAlpha(25),
                   side: BorderSide.none,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   onPressed: () {
@@ -590,14 +922,14 @@ class MaskControlPanel extends StatelessWidget {
                 return Padding(
                   padding: const EdgeInsets.only(right: 8.0),
                   child: InputChip(
-                    label: Text(mask.name, style: TextStyle(fontSize: 12, color: isActive ? Colors.white : AppColors.secondaryText, fontWeight: isActive ? FontWeight.w600 : FontWeight.normal)),
+                    label: Text(mask.name, style: TextStyle(fontSize: 12, color: isActive ? Colors.black : Colors.white, fontWeight: isActive ? FontWeight.w600 : FontWeight.normal)),
                     selected: isActive,
                     showCheckmark: false,
-                    selectedColor: AppColors.accent.withOpacity(0.15),
+                    selectedColor: Colors.white,
                     backgroundColor: Colors.transparent,
-                    side: BorderSide(color: isActive ? AppColors.accent : AppColors.border, width: isActive ? 1.5 : 1.0),
+                    side: BorderSide(color: isActive ? Colors.white : AppColors.border, width: isActive ? 0.0 : 1.0),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    deleteIcon: Icon(Icons.close, size: 14, color: isActive ? Colors.white : AppColors.secondaryText),
+                    deleteIcon: Icon(Icons.close, size: 14, color: isActive ? Colors.black : Colors.white54),
                     onSelected: (bool selected) {
                       onChanged(state.selectMask(index));
                     },
@@ -634,10 +966,10 @@ class MaskControlPanel extends StatelessWidget {
                                       fit: BoxFit.fill,
                                       child: Switch(
                                         value: state.showMaskOverlay,
-                                        activeColor: Colors.white,
-                                        activeTrackColor: AppColors.accent,
-                                        inactiveThumbColor: AppColors.secondaryText,
-                                        inactiveTrackColor: AppColors.border,
+                                        activeThumbColor: Colors.black,
+                                        activeTrackColor: Colors.white,
+                                        inactiveThumbColor: Colors.white,
+                                        inactiveTrackColor: Colors.grey.shade800,
                                         onChanged: (v) => onChanged(state.copyWith(showMaskOverlay: v)),
                                       ),
                                     ),
@@ -654,10 +986,10 @@ class MaskControlPanel extends StatelessWidget {
                                       fit: BoxFit.fill,
                                       child: Switch(
                                         value: state.masks[state.selectedMaskIndex].isInverted,
-                                        activeColor: Colors.white,
-                                        activeTrackColor: AppColors.accent,
-                                        inactiveThumbColor: AppColors.secondaryText,
-                                        inactiveTrackColor: AppColors.border,
+                                        activeThumbColor: Colors.black,
+                                        activeTrackColor: Colors.white,
+                                        inactiveThumbColor: Colors.white,
+                                        inactiveTrackColor: Colors.grey.shade800,
                                         onChanged: (v) {
                                           final m = state.masks[state.selectedMaskIndex];
                                           onChanged(state.updateActiveMask(m.copyWith(isInverted: v)));
@@ -674,21 +1006,21 @@ class MaskControlPanel extends StatelessWidget {
                         _buildEditorSlider('Local Exposure', state.masks[state.selectedMaskIndex].exposure, -1.0, 1.0, 0.0, (v) {
                           final m = state.masks[state.selectedMaskIndex];
                           onChanged(state.updateActiveMask(m.copyWith(exposure: v)));
-                        }),
+                        }, (_) => onChangeStart()),
                         _buildEditorSlider('Radius', state.masks[state.selectedMaskIndex].radius, 0.05, 1.0, 0.5, (v) {
                           final m = state.masks[state.selectedMaskIndex];
                           onChanged(state.updateActiveMask(m.copyWith(radius: v)));
-                        }),
+                        }, (_) => onChangeStart()),
                         _buildEditorSlider('Feather', state.masks[state.selectedMaskIndex].feather, 0.05, 1.0, 0.5, (v) {
                           final m = state.masks[state.selectedMaskIndex];
                           onChanged(state.updateActiveMask(m.copyWith(feather: v)));
-                        }),
+                        }, (_) => onChangeStart()),
                       ],
                     ),
                   ),
                 )
               : const Center(
-                  child: Text('Select a mask', style: TextStyle(color: AppColors.secondaryText, fontSize: 12)),
+                  child: Text('Select a mask', style: TextStyle(color: Colors.white54, fontSize: 12)),
                 ),
         ),
       ],
@@ -726,10 +1058,10 @@ class MaskPainter extends CustomPainter {
       List<Color> colors;
       List<double> stops;
       if (mask.isInverted) {
-        colors = [color.withOpacity(0), color.withOpacity(0), color.withOpacity(opacity)];
+        colors = [color.withAlpha(0), color.withAlpha(0), color.withValues(alpha: opacity)];
         stops = [0.0, stop, 1.0];
       } else {
-        colors = [color.withOpacity(opacity), color.withOpacity(0)];
+        colors = [color.withValues(alpha: opacity), color.withAlpha(0)];
         stops = [stop, 1.0];
       }
 
@@ -760,9 +1092,9 @@ class MaskPainter extends CustomPainter {
       );
 
       final redPaint = Paint()
-        ..color = Colors.red.withOpacity(0.8)
+        ..color = Colors.red.withValues(alpha: 0.8)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.0;
+        ..strokeWidth = 1.5;
         
       canvas.drawOval(rect, redPaint);
     }
@@ -771,3 +1103,4 @@ class MaskPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant MaskPainter oldDelegate) => true;
 }
+
