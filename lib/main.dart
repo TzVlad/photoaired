@@ -240,66 +240,58 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   }
 
   List<double> _buildColorMatrix(EditorState state) {
-    // 1. Експозиція та контраст
-    final double c = state.contrast;
-    final double t = (1.0 - c) * 128.0;
-    final double e = state.exposure * 128.0;
+    // 1. Контраст та базова експозиція
+    final double c = state.contrast.clamp(0.5, 2.0);
+    final double e = state.exposure * 60.0; // м'яка експозиція
 
-    // 2. Тональний діапазон (Whites, Blacks, Highlights, Shadows)
-    // Імітація через комбінований зсув рівнів чорного, білого та півтонів
-    final double wShift = state.whites * 40.0;
-    final double bShift = state.blacks * 40.0;
-    final double hShift = state.highlights * 35.0;
-    final double shShift = state.shadows * 35.0;
-    final double lumaOffset = e + t + wShift + bShift + hShift + shShift;
+    // 2. Безпечний зсув тіней/світла (без екстремальних мінусів)
+    final double hShift = state.highlights * 20.0;
+    final double shShift = state.shadows * 20.0;
+    final double wShift = state.whites * 15.0;
+    final double bShift = state.blacks * 15.0;
+    
+    // Загальний офсет яскравості з захистом від провалу в чорне
+    final double baseOffset = (1.0 - c) * 128.0 + e + hShift + shShift + wShift + bShift;
 
-    // 3. Насиченість та Vibrance
-    // Vibrance підсилює загальну насиченість із захистом від перепалу
-    final double effectiveSat = (state.saturation * (1.0 + state.vibrance * 0.4)).clamp(0.0, 3.0);
+    // 3. Баланс білого як МУЛЬТИПЛІКАТОРИ (White Balance Gains)
+    // Температура: теплий підсилює Red і послаблює Blue
+    final double rGain = (1.0 + state.temperature * 0.22 + state.tint * 0.10).clamp(0.1, 2.0);
+    final double gGain = (1.0 - state.tint * 0.18).clamp(0.1, 2.0);
+    final double bGain = (1.0 - state.temperature * 0.22 - state.tint * 0.08).clamp(0.1, 2.0);
+
+    // 4. Насиченість та Vibrance
+    final double effectiveSat = (state.saturation * (1.0 + state.vibrance * 0.35)).clamp(0.0, 2.5);
     final double invS = 1.0 - effectiveSat;
     const double rW = 0.2126;
     const double gW = 0.7152;
     const double bW = 0.0722;
 
-    final double rR = invS * rW + effectiveSat;
-    final double rG = invS * gW;
-    final double rB = invS * bW;
+    final double rR = (invS * rW + effectiveSat) * rGain * c;
+    final double rG = (invS * gW) * rGain * c;
+    final double rB = (invS * bW) * rGain * c;
 
-    final double gR = invS * rW;
-    final double gG = invS * gW + effectiveSat;
-    final double gB = invS * bW;
+    final double gR = (invS * rW) * gGain * c;
+    final double gG = (invS * gW + effectiveSat) * gGain * c;
+    final double gB = (invS * bW) * gGain * c;
 
-    final double bR = invS * rW;
-    final double bG = invS * gW;
-    final double bB = invS * bW + effectiveSat;
+    final double bR = (invS * rW) * bGain * c;
+    final double bG = (invS * gW) * bGain * c;
+    final double bB = (invS * bW + effectiveSat) * bGain * c;
 
-    // 4. White Balance (Температура та Тінт)
-    final double temp = state.temperature * 45.0;
-    final double tint = state.tint * 45.0;
-
-    // 5. Color Grading (Split Toning через Hue тіней та світла)
+    // 5. Тонке тонування (Split Toning) з обмеженою амплітудою (макс +-8)
     double shadowR = 0, shadowG = 0, shadowB = 0;
     if (state.colorGradingShadowHue > 0) {
       final double radS = state.colorGradingShadowHue * 3.1415926535 / 180.0;
-      shadowR = 15.0 * math.cos(radS);
-      shadowG = 15.0 * math.sin(radS);
-      shadowB = -15.0 * math.cos(radS);
+      shadowR = 8.0 * math.cos(radS);
+      shadowG = 8.0 * math.sin(radS);
+      shadowB = -8.0 * math.cos(radS);
     }
 
-    double highlightR = 0, highlightG = 0, highlightB = 0;
-    if (state.colorGradingHighlightHue > 0) {
-      final double radH = state.colorGradingHighlightHue * 3.1415926535 / 180.0;
-      highlightR = 12.0 * math.cos(radH);
-      highlightG = 12.0 * math.sin(radH);
-      highlightB = -12.0 * math.cos(radH);
-    }
-
-    // Підсумкове зведення в ColorFilter.matrix (4x5)
     return [
-      rR * c, rG * c, rB * c, 0, lumaOffset + temp + tint + shadowR + highlightR,
-      gR * c, gG * c, gB * c, 0, lumaOffset - tint + shadowG + highlightG,
-      bR * c, bG * c, bB * c, 0, lumaOffset - temp + shadowB + highlightB,
-      0,      0,      0,      1, 0,
+      rR, rG, rB, 0, (baseOffset + shadowR).clamp(-80.0, 100.0),
+      gR, gG, gB, 0, (baseOffset + shadowG).clamp(-80.0, 100.0),
+      bR, bG, bB, 0, (baseOffset + shadowB).clamp(-80.0, 100.0),
+      0,  0,  0,  1, 0,
     ];
   }
 
