@@ -23,6 +23,19 @@ Future<Uint8List> prepareImageForGemini(Uint8List rawBytes) async {
   return compute(_resizeAndCompressImage, rawBytes);
 }
 
+String sanitizeJson(String raw) {
+  var text = raw.trim();
+  if (text.startsWith('```json')) {
+    text = text.substring(7);
+  } else if (text.startsWith('```')) {
+    text = text.substring(3);
+  }
+  if (text.endsWith('```')) {
+    text = text.substring(0, text.length - 3);
+  }
+  return text.trim();
+}
+
 class GeminiService {
   final String apiKey;
 
@@ -40,6 +53,8 @@ class GeminiService {
     final preparedReferenceBytes = referenceImageBytes != null
         ? await prepareImageForGemini(referenceImageBytes)
         : null;
+
+    debugPrint('[AI Pipeline] Input bytes: target=${preparedTargetBytes.length}, ref=${preparedReferenceBytes?.length}');
 
     String promptText = '''
 You are an expert parametric image editor AI analyzing an image and user request.
@@ -134,10 +149,17 @@ Return only the raw JSON. No markdown code blocks.
         body: body,
       );
 
+      debugPrint('[AI Pipeline] Response status: ${response.statusCode}');
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final contentText = data['candidates'][0]['content']['parts'][0]['text'];
-        final jsonContent = jsonDecode(contentText);
+        debugPrint('[AI Pipeline] Raw Gemini response text: $contentText');
+
+        final cleanedJsonStr = sanitizeJson(contentText);
+        debugPrint('[AI Pipeline] Cleaned JSON string: $cleanedJsonStr');
+
+        final jsonContent = jsonDecode(cleanedJsonStr);
         
         double clampVal(dynamic val, double min, double max, double def) {
           if (val == null || val is! num) return def;
@@ -192,12 +214,15 @@ Return only the raw JSON. No markdown code blocks.
             newState = newState.addMask(newMask);
           }
         }
-        
+
+        debugPrint('[AI Pipeline] Parsed EditorState: ${jsonEncode(newState.toJson())}');
         return newState;
+      } else {
+        throw Exception('Gemini API returned HTTP status ${response.statusCode}: ${response.body}');
       }
-    } catch (e) {
-      debugPrint('Gemini API Error: $e');
+    } catch (e, stackTrace) {
+      debugPrint('[ERROR] Gemini API Error: $e\n$stackTrace');
+      rethrow;
     }
-    return null;
   }
 }

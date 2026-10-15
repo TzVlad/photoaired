@@ -276,15 +276,27 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
   }
 
   bool _hasLightDelta(EditorState a, EditorState b) {
-    return a.exposure != b.exposure || a.contrast != b.contrast || a.highlights != b.highlights || a.shadows != b.shadows || a.whites != b.whites || a.blacks != b.blacks;
+    return (a.exposure - b.exposure).abs() > 0.001 ||
+           (a.contrast - b.contrast).abs() > 0.001 ||
+           (a.highlights - b.highlights).abs() > 0.001 ||
+           (a.shadows - b.shadows).abs() > 0.001 ||
+           (a.whites - b.whites).abs() > 0.001 ||
+           (a.blacks - b.blacks).abs() > 0.001;
   }
 
   bool _hasColorDelta(EditorState a, EditorState b) {
-    return a.temperature != b.temperature || a.tint != b.tint || a.saturation != b.saturation || a.vibrance != b.vibrance || a.colorGradingShadowHue != b.colorGradingShadowHue || a.colorGradingHighlightHue != b.colorGradingHighlightHue;
+    return (a.temperature - b.temperature).abs() > 0.001 ||
+           (a.tint - b.tint).abs() > 0.001 ||
+           (a.saturation - b.saturation).abs() > 0.001 ||
+           (a.vibrance - b.vibrance).abs() > 0.001 ||
+           (a.colorGradingShadowHue - b.colorGradingShadowHue).abs() > 0.001 ||
+           (a.colorGradingHighlightHue - b.colorGradingHighlightHue).abs() > 0.001;
   }
 
   bool _hasDetailDelta(EditorState a, EditorState b) {
-    return a.clarity != b.clarity || a.sharpness != b.sharpness || a.grain != b.grain;
+    return (a.clarity - b.clarity).abs() > 0.001 ||
+           (a.sharpness - b.sharpness).abs() > 0.001 ||
+           (a.grain - b.grain).abs() > 0.001;
   }
 
   EditorState _mergeTabState(EditorState current, EditorState target, int tabIndex) {
@@ -354,7 +366,18 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
     if (_hasDetailDelta(initialState, finalTargetState)) steps.add(2);
     if (initialState.masks.length != finalTargetState.masks.length) steps.add(3);
 
+    debugPrint('[AI Pipeline] Detected changed tabs: $steps');
+
     try {
+      if (steps.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _state = finalTargetState;
+          });
+        }
+        return;
+      }
+
       for (final tabIndex in steps) {
         if (!mounted) return;
         
@@ -400,30 +423,40 @@ class _EditorScreenState extends State<EditorScreen> with TickerProviderStateMix
       _isLoading = true;
     });
 
-    final referenceBytes = _referenceImage != null ? await _referenceImage!.readAsBytes() : null;
-    final newState = await _geminiService.processPrompt(
-      prompt: prompt,
-      targetImageBytes: _imageBytes!,
-      referenceImageBytes: referenceBytes,
-      currentState: _originalState,
-    );
-    
-    if (newState != null) {
-      _pushUndoState();
-      final combinedMasks = List<AdjustmentMask>.from(_state.masks)..addAll(newState.masks);
+    try {
+      final referenceBytes = _referenceImage != null ? await _referenceImage!.readAsBytes() : null;
+      final newState = await _geminiService.processPrompt(
+        prompt: prompt,
+        targetImageBytes: _imageBytes!,
+        referenceImageBytes: referenceBytes,
+        currentState: _originalState,
+      );
       
-      final animStartState = _state;
-      final animTargetState = newState.copyWith(masks: combinedMasks);
-      
-      setState(() {
-        _isLoading = false;
-      });
-      
-      await _runSynchronizedTour(animStartState, animTargetState);
-    } else {
-      setState(() {
-        _isLoading = false;
-      });
+      if (newState != null) {
+        _pushUndoState();
+        final combinedMasks = List<AdjustmentMask>.from(_state.masks)..addAll(newState.masks);
+        
+        final animStartState = _state;
+        final animTargetState = newState.copyWith(masks: combinedMasks);
+        
+        await _runSynchronizedTour(animStartState, animTargetState);
+      }
+    } catch (e, stackTrace) {
+      debugPrint('[ERROR] Execution Exception: $e\n$stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('AI Processing Error: ${e.toString()}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
